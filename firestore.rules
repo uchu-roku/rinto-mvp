@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() { return request.auth != null; }
+
+    // 単木（読み取りのみ／投入はFunctionsなどから）
+    match /trees/{docId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // 施業計画（サインイン済の登録のみ許可）
+    match /plans/{docId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn();
+      allow delete: if false;
+    }
+
+    // 日報（自分の作成のみ許可）
+    match /work_reports/{docId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+    }
+  }
+}
