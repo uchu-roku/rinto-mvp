@@ -1,0 +1,10 @@
+# Node / build
+node_modules/
+dist/
+# Firebase local
+.firebase/
+# Local env
+frontend/.env
+
+# Raster samples etc.
+frontend/public/__static/rasters/
