@@ -1,0 +1,16 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // 日報の写真: userId 配下のみ本人が書き込み可能
+    match /reports/{userId}/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // ラスタ（COG/GeoTIFFなど）: まずは公開読み取りのみ
+    match /rasters/{allPaths=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+  }
+}
