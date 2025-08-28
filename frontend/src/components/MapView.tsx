@@ -46,6 +46,7 @@ function TreesLayer({
   const map = useMap();
 
   const layerRef = useRef<L.GeoJSON | null>(null);
+  const canvasRendererRef = useRef<L.Canvas>(L.canvas()); // パフォーマンス用
   const drawGroupRef = useRef<L.FeatureGroup | null>(null);
   const allTreesRef = useRef<Tree[] | null>(null);
 
@@ -69,6 +70,7 @@ function TreesLayer({
         const p: any = d.data();
         const lat = Number(p.lat);
         const lng = Number(p.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
         return {
           id: String(p.tree_id ?? d.id ?? ""),
           lat,
@@ -79,7 +81,7 @@ function TreesLayer({
           volume: p.volume_m3 != null ? Number(p.volume_m3) : null,
         };
       })
-      .filter((t) => Number.isFinite(t.lat) && Number.isFinite(t.lng));
+      .filter((t): t is Tree => !!t);
     allTreesRef.current = rows;
     return rows;
   };
@@ -108,7 +110,8 @@ function TreesLayer({
     for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
       const xi = vs[i][1], yi = vs[i][0];
       const xj = vs[j][1], yj = vs[j][0];
-      const intersect = (yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+      const denom = (yj - yi) || 1e-12;
+      const intersect = (yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / denom + xi;
       if (intersect) inside = !inside;
     }
     return inside;
@@ -135,7 +138,10 @@ function TreesLayer({
     const draw = filtered.filter((_, i) => i % step === 0);
 
     // 既存レイヤを除去
-    if (layerRef.current) map.removeLayer(layerRef.current);
+    if (layerRef.current) {
+      map.removeLayer(layerRef.current);
+      layerRef.current = null;
+    }
 
     // GeoJSON 構築
     const fc = {
@@ -155,8 +161,9 @@ function TreesLayer({
       })),
     };
 
-    // 反映
+    // 反映（Canvasレンダラ使用）
     const lyr = L.geoJSON(fc, {
+      renderer: canvasRendererRef.current,
       pointToLayer: (f: any, latlng) => {
         const p = f.properties ?? {};
         const isSel = selectedId && String(p.tree_id ?? "") === selectedId;
@@ -241,8 +248,8 @@ function TreesLayer({
       const inside = (lat: number, lng: number) => {
         if (shape.getBounds) return shape.getBounds().contains(L.latLng(lat, lng)); // 矩形
         if (shape.getLatLngs) {
-          const latlngs = shape.getLatLngs()[0] ?? [];
-          const poly: [number, number][] = latlngs.map((ll: any) => [ll.lat, ll.lng]);
+          const latlngs = (shape.getLatLngs()?.[0] ?? []) as L.LatLng[];
+          const poly: [number, number][] = latlngs.map((ll) => [ll.lat, ll.lng]);
           return pointInPolygon([lat, lng], poly);
         }
         return false;
@@ -250,7 +257,7 @@ function TreesLayer({
 
       const picked = features.filter((f: any) => {
         const [lng, lat] = f.geometry?.coordinates || [null, null];
-        return lat != null && lng != null && inside(lat, lng);
+        return Number.isFinite(lat) && Number.isFinite(lng) && inside(lat as number, lng as number);
       });
 
       const props = picked.map((f: any) => f.properties || {});
@@ -287,9 +294,15 @@ function TreesLayer({
     };
     reload();
     map.on("moveend", debounced);
+    map.on("zoomend", debounced); // ← 追加
     return () => {
+      clearTimeout(t);
       map.off("moveend", debounced);
-      if (layerRef.current) map.removeLayer(layerRef.current);
+      map.off("zoomend", debounced);
+      if (layerRef.current) {
+        map.removeLayer(layerRef.current);
+        layerRef.current = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters]);
@@ -315,7 +328,7 @@ function TreesLayer({
     const csv =
       headers.join(",") +
       "\n" +
-      rows.map((r) => headers.map((h) => JSON.stringify(r[h] ?? "")).join(",")).join("\n");
+      rows.map((r) => headers.map((h) => JSON.stringify((r as any)[h] ?? "")).join(",")).join("\n");
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -410,14 +423,14 @@ export default function MapView() {
   // レイヤ切替・透過
   const [opacity, setOpacity] = useState(0.7);
   const [base, setBase] = useState([
-    { id: "osm", label: "OSM", active: true },
-    { id: "sat", label: "航空写真", active: false },
+    { id: "std", label: "標準地図", active: true },
+    { id: "photo", label: "航空写真", active: false },
   ]);
   const [overlays, setOverlays] = useState([{ id: "slope", label: "傾斜", visible: false }]);
   const changeBase = (id: string) => setBase((bs) => bs.map((b) => ({ ...b, active: b.id === id })));
   const toggleOverlay = (id: string, next: boolean) =>
     setOverlays((os) => os.map((o) => (o.id === id ? { ...o, visible: next } : o)));
-  const activeBase = base.find((b) => b.active)?.id ?? "osm";
+  const activeBase = base.find((b) => b.active)?.id ?? "std";
 
   // 検索ドロワー
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -430,18 +443,22 @@ export default function MapView() {
 
   return (
     <div style={{ height: "100%", position: "relative" }}>
-      <MapContainer bounds={initial} style={{ height: "100%" }}>
-        {activeBase === "osm" && (
+      <MapContainer
+        bounds={initial}
+        style={{ height: "100%" }}
+        preferCanvas // ← 追加：大量点描画に有効
+      >
+        {/* 地理院タイル（安定・推奨） */}
+        {activeBase === "std" && (
           <TileLayer
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            attribution="&copy; OpenStreetMap"
+            url="https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png"
+            attribution="&copy; 国土地理院"
           />
         )}
-        {activeBase === "sat" && (
+        {activeBase === "photo" && (
           <TileLayer
-            url="https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
-            subdomains={["mt0", "mt1", "mt2", "mt3"]}
-            attribution="Imagery"
+            url="https://cyberjapandata.gsi.go.jp/xyz/ort/{z}/{x}/{y}.jpg"
+            attribution="&copy; 国土地理院 航空写真"
           />
         )}
 
@@ -454,10 +471,7 @@ export default function MapView() {
           />
         )}
 
-        <TreesLayer
-          filters={filters}
-          onFeaturesChange={setFeatures}
-        />
+        <TreesLayer filters={filters} onFeaturesChange={setFeatures} />
       </MapContainer>
 
       {/* 右上：レイヤ切替（ヘッダと重ならないよう topOffset を調整） */}
