@@ -1,0 +1,23 @@
+{
+  "name": "rinto-mvp-functions",
+  "private": true,
+  "main": "lib/index.js",
+  "engines": { "node": "20" },
+  "scripts": {
+    "build": "tsc -p .",
+    "serve": "npm run build && firebase emulators:start --only functions,firestore,hosting,storage",
+    "deploy": "npm run build && firebase deploy --only functions"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.5.0",
+    "firebase-functions": "^5.0.1",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.4.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

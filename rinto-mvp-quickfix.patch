@@ -1,0 +1,380 @@
+--- a/frontend/src/lib/firebase.ts+++ b/frontend/src/lib/firebase.ts@@ -1,15 +1,20 @@-import { initializeApp } from "firebase/app";
++import { initializeApp, getApps } from "firebase/app";
+ import { getAuth, GoogleAuthProvider } from "firebase/auth";
+ import { getFirestore } from "firebase/firestore";
++import { getStorage } from "firebase/storage";
+ 
+-const app = initializeApp({
+-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+-});
++// Avoid duplicate initializeApp across modules
++const app = getApps().length
++  ? getApps()[0]
++  : initializeApp({
++      apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
++      authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
++      projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
++      storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
++      appId: import.meta.env.VITE_FIREBASE_APP_ID,
++    });
+ 
+ export const auth = getAuth(app);
+ export const provider = new GoogleAuthProvider();
+-export const db = getFirestore(app);   // ← これを追加
++export const db = getFirestore(app);
++export const storage = getStorage(app);
+
+--- a/frontend/src/firebase.ts+++ b/frontend/src/firebase.ts@@ -1,20 +1,2 @@-import { initializeApp } from "firebase/app";
+-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from "firebase/auth";
+-import { getFirestore } from "firebase/firestore";
+-import { getStorage } from "firebase/storage";
+-
+-const firebaseConfig = {
+-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+-  appId: import.meta.env.VITE_FIREBASE_APP_ID
+-};
+-
+-export const app = initializeApp(firebaseConfig);
+-export const auth = getAuth(app);
+-export const provider = new GoogleAuthProvider();
+-export const db = getFirestore(app);
+-export const storage = getStorage(app);
+-export const login = () => signInWithPopup(auth, provider);
+-export const logout = () => signOut(auth);
++// Thin re-export to avoid duplicate initializeApp implementations
++export { app, auth, provider, db, storage, login, logout } from "./lib/firebase";
+
+--- a/frontend/src/components/AuthButton.tsx+++ b/frontend/src/components/AuthButton.tsx@@ -1,44 +1,27 @@ // frontend/src/components/AuthButton.tsx
+-import React from 'react'; // ★ これが無いと本番で "React is not defined"
+-import { useEffect, useState } from 'react';
++import React, { useEffect, useState } from 'react';
+ import { auth, provider } from '../lib/firebase';
+-import {
+-  onAuthStateChanged,
+-  signInWithPopup,
+-  signOut,
+-  type User,
+-} from 'firebase/auth';
++import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
+ 
+ export default function AuthButton() {
+   const [user, setUser] = useState<User | null>(auth.currentUser);
+-
+   useEffect(() => onAuthStateChanged(auth, setUser), []);
+ 
+-  if (!user) {
+-    const handleLogin = async () => {
+-      try {
+-        await signInWithPopup(auth, provider);
+-      } catch (e) {
+-        console.error(e);
+-        alert('ログインに失敗しました。');
+-      }
+-    };
+-    return <button onClick={handleLogin}>ログイン</button>;
+-  }
+-
+-  const handleLogout = async () => {
+-    try {
+-      await signOut(auth);
+-    } catch (e) {
+-      console.error(e);
+-      alert('ログアウトに失敗しました。');
+-    }
++  const login = async () => {
++    try { await signInWithPopup(auth, provider); }
++    catch (e) { console.error(e); alert('ログインに失敗しました'); }
++  };
++  const logout = async () => {
++    try { await signOut(auth); }
++    catch (e) { console.error(e); alert('ログアウトに失敗しました'); }
+   };
+ 
++  if (!user) return <button onClick={login}>ログイン</button>;
++
+   return (
+-    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
++    <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+       <span>👤 {user.displayName ?? user.email ?? 'ユーザー'}</span>
+-      <button onClick={handleLogout}>ログアウト</button>
++      <button onClick={logout}>ログアウト</button>
+     </div>
+   );
+ }
+
+--- a/frontend/src/components/Filters.tsx+++ b/frontend/src/components/Filters.tsx@@ -1,11 +1,9 @@ // frontend/src/components/Filters.tsx
+-import { useMemo, useState } from 'react';
++import { useEffect, useMemo, useState } from 'react';
+ import Papa from 'papaparse';
+-import { Tree } from '../types/tree';
++import type { Tree } from '../types/tree';
+ 
+-export default function Filters({ source, onChange }:{
+-  source: Tree[]; onChange: (rows: Tree[]) => void;
+-}) {
++export default function Filters({ source, onChange }:{ source: Tree[]; onChange:(rows:Tree[])=>void }) {
+   const [species, setSpecies] = useState('');
+   const [minDbh, setMinDbh] = useState<number | ''>('');
+   const [maxDbh, setMaxDbh] = useState<number | ''>('');
+@@ -19,16 +17,13 @@     });
+   }, [source, species, minDbh, maxDbh]);
+ 
+-  // 親へ反映
+-  onChange(filtered);
++  useEffect(() => onChange(filtered), [filtered]);
+ 
+   const download = () => {
+-    const rows = filtered.map(r => ({
+-      id: r.id, lat: r.lat, lng: r.lng, species: r.species ?? '',
+-      dbh: r.dbh ?? '', height: r.height ?? '', volume: r.volume ?? ''
+-    }));
+-    const csv = Papa.unparse(rows);
+-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
++    const csv = Papa.unparse(filtered.map(r => ({
++      id: r.id, lat: r.lat, lng: r.lng, species: r.species ?? '', dbh_cm: r.dbh ?? '', height_m: r.height ?? '', volume_m3: r.volume ?? ''
++    })));
++    const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
+     const url = URL.createObjectURL(blob);
+     const a = document.createElement('a');
+     a.href = url; a.download = 'trees.csv'; a.click();
+@@ -42,7 +37,7 @@       <input placeholder="DBH最大" value={maxDbh} onChange={e=>setMaxDbh(e.target.value===''?'':Number(e.target.value))} />
+       <button onClick={download}>CSV出力</button>
+       <style>{`
+-        .filters{position:absolute;top:64px;left:12px;display:flex;gap:8px;background:#fff;padding:8px;border:1px solid #ddd;border-radius:8px}
++        .filters{position:absolute;top:64px;left:12px;display:flex;gap:8;background:#fff;padding:8px;border:1px solid #ddd;border-radius:8px;z-index:1000}
+         .filters input{width:100px}
+       `}</style>
+     </div>
+
+--- a/frontend/src/components/Plans.tsx+++ b/frontend/src/components/Plans.tsx@@ -1,5 +1,7 @@+// frontend/src/components/Plans.tsx
+ import React, { useEffect, useState } from "react";
+-import axios from "axios";
++import { db } from "../lib/firebase";
++import { addDoc, collection, onSnapshot, serverTimestamp } from "firebase/firestore";
+ 
+ type Plan = {
+   id?: string;
+@@ -13,32 +15,46 @@ 
+ export default function Plans(){
+   const [items, setItems] = useState<Plan[]>([]);
+-  const [form, setForm] = useState<Plan>({ name:"", task_type:"" });
++  const [form, setForm] = useState<Plan>({ name:'', task_type:'' });
+ 
+-  const load = async ()=>{ const { data } = await axios.get("/api/plans"); setItems(data); };
+-  useEffect(()=>{ load(); }, []);
++  useEffect(() => {
++    const unsub = onSnapshot(collection(db, 'plans'), snap => {
++      setItems(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })));
++    });
++    return () => unsub();
++  }, []);
+ 
+-  const add = async ()=>{ await axios.post("/api/plans", form); setForm({ name:"", task_type:"" }); await load(); };
++  const submit = async () => {
++    if (!form.name || !form.task_type) return alert('名称と作業内容は必須です');
++    await addDoc(collection(db, 'plans'), { ...form, created_at: serverTimestamp() });
++    setForm({ name:'', task_type:'' });
++  };
+ 
+   return (
+-    <div style={{padding:16}}>
++    <div style={{ padding:16 }}>
+       <h2>施業計画</h2>
+-      <div style={{display:"flex", gap:8, marginBottom:12}}>
+-        <input placeholder="名称" value={form.name} onChange={e=>setForm({...form, name:e.target.value})}/>
+-        <input placeholder="作業内容" value={form.task_type} onChange={e=>setForm({...form, task_type:e.target.value})}/>
+-        <input type="number" placeholder="進捗%" value={form.status_pct||""} onChange={e=>setForm({...form, status_pct:Number(e.target.value)})}/>
+-        <button onClick={add}>追加</button>
++      <div style={{ display:'grid', gap:8, maxWidth:720 }}>
++        <input placeholder="名称" value={form.name} onChange={e=>setForm(f=>({ ...f, name:e.target.value }))} />
++        <input placeholder="作業内容" value={form.task_type} onChange={e=>setForm(f=>({ ...f, task_type:e.target.value }))} />
++        <input placeholder="担当者" value={form.assignee||''} onChange={e=>setForm(f=>({ ...f, assignee:e.target.value }))} />
++        <div style={{ display:'flex', gap:8 }}>
++          <input type="date" value={form.period_planned_start||''} onChange={e=>setForm(f=>({ ...f, period_planned_start:e.target.value }))} />
++          <input type="date" value={form.period_planned_end||''} onChange={e=>setForm(f=>({ ...f, period_planned_end:e.target.value }))} />
++          <input type="number" placeholder="進捗%" value={form.status_pct??''} onChange={e=>setForm(f=>({ ...f, status_pct: Number(e.target.value) }))} />
++        </div>
++        <button onClick={submit}>登録</button>
+       </div>
+-      <table border={1} cellPadding={6} style={{borderCollapse:"collapse", width:"100%"}}>
+-        <thead><tr><th>名称</th><th>作業内容</th><th>担当</th><th>予定</th><th>進捗%</th></tr></thead>
++
++      <table style={{ marginTop:16, width:'100%', borderCollapse:'collapse' }}>
++        <thead><tr><th>名称</th><th>作業内容</th><th>担当</th><th>予定</th><th style={{textAlign:'right'}}>進捗%</th></tr></thead>
+         <tbody>
+-          {items.map(p=> (
++          {items.map(p => (
+             <tr key={p.id}>
+               <td>{p.name}</td>
+               <td>{p.task_type}</td>
+-              <td>{p.assignee||"-"}</td>
+-              <td>{p.period_planned_start||""} ~ {p.period_planned_end||""}</td>
+-              <td style={{textAlign:"right"}}>{p.status_pct??0}</td>
++              <td>{p.assignee||'-'}</td>
++              <td>{(p.period_planned_start||'') + ' ~ ' + (p.period_planned_end||'')}</td>
++              <td style={{textAlign:'right'}}>{p.status_pct??0}</td>
+             </tr>
+           ))}
+         </tbody>
+
+--- a/frontend/src/components/Reports.tsx+++ b/frontend/src/components/Reports.tsx@@ -1,57 +1,69 @@+// frontend/src/components/Reports.tsx
+ import React, { useState } from "react";
+-import { auth, storage } from "../firebase";
++import { auth, db, storage } from "../lib/firebase";
++import { addDoc, collection, serverTimestamp } from "firebase/firestore";
+ import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+-import axios from "axios";
+ 
+ export default function Reports(){
+   const [text, setText] = useState("");
+   const [photo, setPhoto] = useState<File|null>(null);
+   const [busy, setBusy] = useState(false);
+-  const [track, setTrack] = useState<GeolocationPosition[] >([]);
+-  const [watchId, setWatchId] = useState<number| null>(null);
++  const [track, setTrack] = useState<GeolocationPosition[]>([]);
++  const [watchId, setWatchId] = useState<number | null>(null);
+ 
+-  const startGPS = ()=>{
++  const startGPS = () => {
+     if (watchId != null) return;
+     const id = navigator.geolocation.watchPosition(
+-      p => setTrack(prev=>[...prev,p]),
+-      console.error,
+-      { enableHighAccuracy:true, maximumAge:5000, timeout:10000 }
++      p => setTrack(prev => [...prev, p]),
++      err => console.warn(err),
++      { enableHighAccuracy:true, maximumAge:0, timeout:60000 }
+     );
+     setWatchId(id);
+   };
+-  const stopGPS = ()=>{ if (watchId!=null) navigator.geolocation.clearWatch(watchId); setWatchId(null); };
++  const stopGPS = () => {
++    if (watchId != null) { navigator.geolocation.clearWatch(watchId); setWatchId(null); }
++  };
+ 
+-  const submit = async ()=>{
++  const submit = async () => {
++    const user = auth.currentUser;
++    if (!user) return alert('ログインしてください');
+     setBusy(true);
+-    try{
++    try {
+       let photoUrl: string | undefined;
+-      const uid = auth.currentUser!.uid;
+       if (photo) {
+-        const r = ref(storage, `reports/${uid}/${Date.now()}_${photo.name}`);
++        const key = `reports/${user.uid}/${Date.now()}-${photo.name}`;
++        const r = ref(storage, key);
+         await uploadBytes(r, photo);
+         photoUrl = await getDownloadURL(r);
+       }
+-      const features = [{
+-        type: "Feature",
+-        geometry: { type: "LineString", coordinates: track.map(p=>[p.coords.longitude, p.coords.latitude]) },
+-        properties: { start: track[0]?.timestamp, end: track.at(-1)?.timestamp }
+-      }];
+-      await axios.post("/api/reports", {
+-        uid, text, photoUrl, track: { type:"FeatureCollection", features }
++      // 軌跡を GeoJSON LineString へ
++      const coords = track.map(p => [p.coords.longitude, p.coords.latitude, p.timestamp]);
++      const geojson = coords.length ? { type:'LineString', coordinates: coords } : null;
++
++      await addDoc(collection(db, 'work_reports'), {
++        userId: user.uid,
++        text,
++        photoUrl: photoUrl || null,
++        track: geojson,
++        created_at: serverTimestamp(),
+       });
+-      setText(""); setPhoto(null); setTrack([]);
+-      alert("送信しました");
+-    }catch(e:any){ alert(e.message); }
+-    finally{ setBusy(false); }
++      setText(''); setPhoto(null); setTrack([]); stopGPS();
++      alert('送信しました');
++    } catch (e) {
++      console.error(e);
++      alert('送信に失敗しました');
++    } finally {
++      setBusy(false);
++    }
+   };
+ 
+   return (
+-    <div style={{padding:16}}>
++    <div style={{ padding:16 }}>
+       <h2>日報</h2>
+-      <div style={{display:"grid", gap:8, maxWidth:720}}>
+-        <textarea placeholder="本文" value={text} onChange={e=>setText(e.target.value)} rows={5}/>
+-        <input type="file" accept="image/*" onChange={e=>setPhoto(e.target.files?.[0]||null)}/>
+-        <div style={{display:"flex", gap:8, alignItems:"center"}}>
++      <div style={{ display:'grid', gap:8, maxWidth:720 }}>
++        <textarea placeholder="本文" value={text} onChange={e=>setText(e.target.value)} rows={5} />
++        <input type="file" accept="image/*" onChange={e=>setPhoto(e.target.files?.[0]||null)} />
++        <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+           <button onClick={startGPS} disabled={watchId!=null}>GPS開始</button>
+           <button onClick={stopGPS} disabled={watchId==null}>GPS停止</button>
+           <span>位置点数: {track.length}</span>
+
+--- a/.github/workflows/deploy-prod.yml+++ b/.github/workflows/deploy-prod.yml@@ -16,48 +16,18 @@         with:
+           node-version: 20
+ 
+-      # ---------- Frontend ----------
+-      - name: Create frontend/.env from secrets
+-        working-directory: frontend
+-        run: |
+-          echo VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }} >> .env
+-          echo VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }} >> .env
+-          echo VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }} >> .env
+-          echo VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }} >> .env
+-          echo VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }} >> .env
+-
+-      - name: Ensure npm registry
+-        run: |
+-          npm config set registry https://registry.npmjs.org/
+-          npm config set audit false
+-          npm config set fund false
+-
+-      - name: Pin transitive deps (math-intrinsics)
+-        working-directory: frontend
+-        run: npm pkg set "overrides.math-intrinsics=1.0.0"
+-
+-      - name: Prepare entry HTML (fallback)
+-        working-directory: frontend
+-        run: |
+-          if [ ! -f index.html ] && [ -f public/index.html ]; then
+-            cp public/index.html index.html
+-          fi
+-
+-      - name: Install deps & Build (frontend)
++      - name: Build frontend
+         working-directory: frontend
+         env:
+-          NPM_CONFIG_AUDIT: "false"
+-          NPM_CONFIG_FUND: "false"
++          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
++          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
++          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
++          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
++          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+         run: |
+-          npm config set fetch-retries 5
+-          npm config set fetch-retry-factor 2
+-          npm config set fetch-retry-mintimeout 20000
+-          npm config set fetch-retry-maxtimeout 120000
+-          npm config set prefer-offline true
+-          npm install || (npm config set registry https://registry.npmmirror.com/ && npm install)
++          npm ci
+           npm run build
+ 
+-      # ---------- Hosting only ----------
+       - name: Deploy Hosting (live)
+         uses: FirebaseExtended/action-hosting-deploy@v0
+         with:

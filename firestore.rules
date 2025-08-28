@@ -1,0 +1,61 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 共通ヘルパ
+    function authed() { return request.auth != null; }
+    function sameOrg(org) { return authed() && request.auth.token.org_id == org; }
+    function isPrivUser() {
+      // admin / manager を特権者とみなす（必要なら 'staff' を追加）
+      return authed() && (request.auth.token.role == 'admin' || request.auth.token.role == 'manager');
+    }
+
+    // ===== reports =====
+    match /reports/{id} {
+      // 作成：org一致＆作成者は自分
+      allow create: if authed()
+        && request.resource.data.org_id == request.auth.token.org_id
+        && request.resource.data.created_by == request.auth.uid;
+
+      // 参照：同一orgであれば読める（必要なら閲覧制限を強めてOK）
+      allow read: if sameOrg(resource.data.org_id);
+
+      // 更新：同一org かつ 作成者本人 or 特権者
+      //      ＋ 不変フィールド（org_id, created_by）は変更不可
+      allow update: if sameOrg(resource.data.org_id)
+        && (resource.data.created_by == request.auth.uid || isPrivUser())
+        && request.resource.data.org_id == resource.data.org_id
+        && request.resource.data.created_by == resource.data.created_by;
+
+      // 削除は不可（運用で論理削除推奨）
+      allow delete: if false;
+    }
+
+    // ===== plans =====
+    match /plans/{id} {
+      // こちらも created_by を必須にしておくと監査しやすい
+      allow create: if authed()
+        && request.resource.data.org_id == request.auth.token.org_id
+        && request.resource.data.created_by == request.auth.uid;
+
+      allow read: if sameOrg(resource.data.org_id);
+
+      allow update: if sameOrg(resource.data.org_id)
+        && (resource.data.created_by == request.auth.uid || isPrivUser())
+        && request.resource.data.org_id == resource.data.org_id
+        && request.resource.data.created_by == resource.data.created_by;
+
+      allow delete: if false;
+    }
+
+    // ===== trees =====
+    // クライアント直読みする設計なら、orgベースでreadのみ許可。
+    // Functions経由のみなら read: false にしてもOK。
+    match /trees/{id} {
+      allow read: if sameOrg(resource.data.org_id);
+      allow write: if false;
+    }
+
+    // 他コレクションも org_id を基準に同様に縛る
+  }
+}

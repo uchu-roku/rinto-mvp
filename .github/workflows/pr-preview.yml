@@ -1,0 +1,79 @@
+name: PR Preview (Firebase Hosting)
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Create frontend/.env from secrets
+        working-directory: frontend
+        run: |
+          echo VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }} >> .env
+          echo VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }} >> .env
+          echo VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }} >> .env
+          echo VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }} >> .env
+          echo VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }} >> .env
+
+      - name: Ensure npm registry
+        run: |
+          npm config set registry https://registry.npmjs.org/
+          npm config set audit false
+          npm config set fund false
+
+      - name: Prepare entry HTML (fallback)
+        working-directory: frontend
+        run: |
+          echo "== current dir ==" && pwd
+          echo "== list ==" && ls -la
+          if [ ! -f index.html ] && [ -f public/index.html ]; then
+            cp public/index.html index.html
+            echo "[copied] public/index.html -> index.html"
+            ls -la
+          fi
+
+      # ★ 追加：依存を安全に固定（以前の notarget/403 対策）
+      - name: Pin transitive deps (math-intrinsics)
+        working-directory: frontend
+        run: |
+          npm pkg set "overrides.math-intrinsics=1.0.0"
+
+      - name: Install deps & Build (frontend)
+        working-directory: frontend
+        env:
+          NPM_CONFIG_AUDIT: "false"
+          NPM_CONFIG_FUND: "false"
+        run: |
+          npm config set fetch-retries 5
+          npm config set fetch-retry-factor 2
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set prefer-offline true
+
+          npm install || (
+            echo "npmjs 失敗 → ミラーに切替えて再試行します" &&
+            npm config set registry https://registry.npmmirror.com/ &&
+            npm install
+          )
+
+          npm run build
+
+      - name: Deploy to Firebase Hosting Preview
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: ${{ secrets.FIREBASE_PROJECT_ID }}
+          channelId: pr-${{ github.event.number }}
+          entryPoint: .
