@@ -24,6 +24,16 @@ import OpacitySlider from "./map/OpacitySlider";
 import TreePopup from "./map/TreePopup";
 import SearchDrawer, { type Filters } from "./search/SearchDrawer";
 
+// -------------------------------- 共有定数 --------------------------------
+const SPECIES_COLORS: Record<string, string> = {
+  "スギ": "#3b7",
+  "ヒノキ": "#2a6",
+  "カラマツ": "#c84",
+  "トドマツ": "#58c",
+  "エゾマツ": "#26a",
+  "その他": "#888",
+};
+
 // ----------------------------- 型 -----------------------------
 type Tree = {
   id: string;
@@ -34,6 +44,51 @@ type Tree = {
   height?: number | null;
   volume?: number | null;
 };
+
+// ---------------------- StatusBar（地図用） ----------------------
+function StatusBar() {
+  const map = useMap() as any;
+  const [latlng, setLatlng] = React.useState<{ lat: number; lng: number }>({ lat: 0, lng: 0 });
+  const [zoom, setZoom] = React.useState(map.getZoom());
+  const [online, setOnline] = React.useState<boolean>(navigator.onLine);
+
+  React.useEffect(() => {
+    const onMove = (e: any) => setLatlng(map.mouseEventToLatLng(e.originalEvent));
+    const onZoom = () => setZoom(map.getZoom());
+    (map.getContainer() as HTMLElement).addEventListener("mousemove", onMove);
+    map.on("zoomend", onZoom);
+    const onl = () => setOnline(true), off = () => setOnline(false);
+    window.addEventListener("online", onl); window.addEventListener("offline", off);
+    return () => {
+      (map.getContainer() as HTMLElement).removeEventListener("mousemove", onMove);
+      map.off("zoomend", onZoom);
+      window.removeEventListener("online", onl); window.removeEventListener("offline", off);
+    };
+  }, [map]);
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: 0,
+        height: 28,
+        background: "rgba(255,255,255,.9)",
+        borderTop: "1px solid #ddd",
+        display: "flex",
+        alignItems: "center",
+        gap: 16,
+        padding: "0 12px",
+        zIndex: 1000,
+      }}
+    >
+      <span>📍 {latlng.lat.toFixed(5)}, {latlng.lng.toFixed(5)}</span>
+      <span>🔎 z{zoom}</span>
+      <span>● {online ? "オンライン" : "オフライン"}</span>
+    </div>
+  );
+}
 
 // ---------------------- TreesLayer（子） ----------------------
 function TreesLayer({
@@ -161,15 +216,16 @@ function TreesLayer({
       })),
     };
 
-    // 反映（Canvasレンダラ使用）
+    // 反映（Canvasレンダラ使用）＋ 樹種色分け
     const lyr = L.geoJSON(fc, {
       renderer: canvasRendererRef.current,
       pointToLayer: (f: any, latlng) => {
         const p = f.properties ?? {};
         const isSel = selectedId && String(p.tree_id ?? "") === selectedId;
+        const col = SPECIES_COLORS[p.species || "その他"] || "#0a7";
         return L.circleMarker(latlng, {
           radius: isSel ? 7 : 4,
-          color: isSel ? "#e91e63" : "#0a7",
+          color: isSel ? "#e91e63" : col,
           weight: isSel ? 2 : 1,
         });
       },
@@ -217,9 +273,10 @@ function TreesLayer({
     l.eachLayer((layer: any) => {
       const p = layer.feature?.properties ?? {};
       const isSel = selectedId && String(p.tree_id ?? "") === selectedId;
+      const col = SPECIES_COLORS[p.species || "その他"] || "#0a7";
       layer.setStyle?.({
         radius: isSel ? 7 : 4,
-        color: isSel ? "#e91e63" : "#0a7",
+        color: isSel ? "#e91e63" : col,
         weight: isSel ? 2 : 1,
       });
       if (isSel) layer.bringToFront?.();
@@ -294,7 +351,7 @@ function TreesLayer({
     };
     reload();
     map.on("moveend", debounced);
-    map.on("zoomend", debounced); // ← 追加
+    map.on("zoomend", debounced); // 追加
     return () => {
       clearTimeout(t);
       map.off("moveend", debounced);
@@ -443,11 +500,7 @@ export default function MapView() {
 
   return (
     <div style={{ height: "100%", position: "relative" }}>
-      <MapContainer
-        bounds={initial}
-        style={{ height: "100%" }}
-        preferCanvas // ← 追加：大量点描画に有効
-      >
+      <MapContainer bounds={initial} style={{ height: "100%" }} preferCanvas>
         {/* 地理院タイル（安定・推奨） */}
         {activeBase === "std" && (
           <TileLayer
@@ -464,15 +517,41 @@ export default function MapView() {
 
         {/* オーバーレイ例：傾斜（実タイルURLに置き換え可） */}
         {overlays.find((o) => o.id === "slope")?.visible && (
-          <TileLayer
-            url="https://tile.example.com/slope/{z}/{x}/{y}.png"
-            opacity={opacity}
-            attribution="Slope demo"
-          />
+          <TileLayer url="https://tile.example.com/slope/{z}/{x}/{y}.png" opacity={opacity} attribution="Slope demo" />
         )}
 
         <TreesLayer filters={filters} onFeaturesChange={setFeatures} />
+        <StatusBar />
       </MapContainer>
+
+      {/* 右下：凡例 */}
+      <div
+        style={{
+          position: "absolute",
+          right: 12,
+          bottom: 12,
+          zIndex: 1000,
+          background: "rgba(255,255,255,.95)",
+          borderRadius: 8,
+          boxShadow: "0 2px 8px rgba(0,0,0,.15)",
+          padding: 8,
+        }}
+      >
+        <div style={{ fontWeight: 600, marginBottom: 6 }}>凡例</div>
+        {(speciesOptions.length ? speciesOptions : Object.keys(SPECIES_COLORS)).map((sp) => (
+          <div key={sp} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <span
+              style={{
+                width: 16,
+                height: 12,
+                border: "1px solid #999",
+                background: SPECIES_COLORS[sp] || SPECIES_COLORS["その他"],
+              }}
+            />
+            <span style={{ fontSize: 13 }}>{sp}</span>
+          </div>
+        ))}
+      </div>
 
       {/* 右上：レイヤ切替（ヘッダと重ならないよう topOffset を調整） */}
       <LayerSwitcher
