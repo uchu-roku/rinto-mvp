@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { db } from "../lib/firebase";
 import {
-  addDoc, collection, deleteDoc, doc, onSnapshot, orderBy, query,
+  addDoc, collection, deleteDoc, doc, onSnapshot,
   serverTimestamp, updateDoc
 } from "firebase/firestore";
 
@@ -28,6 +28,7 @@ const toYMD = (d: Date) => d.toISOString().slice(0, 10);
 const inferStatus = (p: Plan): Plan["status"] =>
   p.status || ((p.status_pct ?? 0) >= 100 ? "完了" : (p.status_pct ?? 0) > 0 ? "実施中" : "計画");
 
+// ================== 本体 ==================
 export default function Plans() {
   const [view, setView] = useState<ViewMode>("table");
   const [items, setItems] = useState<Plan[]>([]);
@@ -38,12 +39,14 @@ export default function Plans() {
     name: "", task_type: "", assignee: "", period_planned_start: "", period_planned_end: "", status_pct: 0, status: "計画"
   });
 
-  // 購読
+  // Firestore購読（created_at の有無に関わらずクライアント側で並べ替え）
   useEffect(() => {
-    const qy = query(collection(db, "plans"), orderBy("created_at", "desc"));
-    const unsub = onSnapshot(qy, (snap) =>
-      setItems(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })))
-    );
+    const refCol = collection(db, "plans");
+    const unsub = onSnapshot(refCol, (snap) => {
+      const rows = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+      rows.sort((a, b) => (b.created_at?.toMillis?.() || 0) - (a.created_at?.toMillis?.() || 0));
+      setItems(rows);
+    });
     return () => unsub();
   }, []);
 
@@ -58,10 +61,13 @@ export default function Plans() {
         period_planned_start: f.period_planned_start || "",
         period_planned_end: f.period_planned_end || "",
         status_pct: clamp(Number(f.status_pct ?? 0)),
-        status: (f.status as any) || "計画", // 新規に付加しても既存データは影響なし
+        status: (f.status as any) || "計画",
         created_at: serverTimestamp(),
       });
       setF({ name: "", task_type: "", assignee: "", period_planned_start: "", period_planned_end: "", status_pct: 0, status: "計画" });
+    } catch (e: any) {
+      alert("保存に失敗しました: " + (e?.message || e));
+      console.error(e);
     } finally { setBusy(false); }
   };
 
@@ -206,7 +212,7 @@ function KanbanView({ rows, onUpdate }: { rows: Plan[]; onUpdate: (id: string, p
     const idx = cols.indexOf(inferStatus(r));
     const next = cols[Math.min(cols.length - 1, Math.max(0, idx + dir))];
     const patch: Partial<Plan> = { status: next };
-    // おまけ：状態変更時に status_pct を補正
+    // 状態変更時に status_pct を補正
     if (next === "計画") patch.status_pct = 0;
     if (next === "完了") patch.status_pct = 100;
     if (next === "実施中" && (!r.status_pct || r.status_pct === 0 || r.status_pct === 100)) patch.status_pct = 50;
@@ -251,8 +257,14 @@ function KanbanView({ rows, onUpdate }: { rows: Plan[]; onUpdate: (id: string, p
 function GanttMini({ rows }: { rows: Plan[] }) {
   if (rows.length === 0) return <div style={{ color: "#888" }}>データがありません</div>;
   const d = (s?: string) => (s ? day(s) : new Date());
-  const minStart = rows.reduce<Date>((a, r) => (r.period_planned_start ? (d(r.period_planned_start) < a ? d(r.period_planned_start) : a) : a), d(rows[0].period_planned_start));
-  const maxEnd = rows.reduce<Date>((a, r) => (r.period_planned_end ? (d(r.period_planned_end) > a ? d(r.period_planned_end) : a) : a), d(rows[0].period_planned_end || toYMD(new Date())));
+  const minStart = rows.reduce<Date>(
+    (a, r) => (r.period_planned_start ? (d(r.period_planned_start) < a ? d(r.period_planned_start) : a) : a),
+    d(rows[0].period_planned_start)
+  );
+  const maxEnd = rows.reduce<Date>(
+    (a, r) => (r.period_planned_end ? (d(r.period_planned_end) > a ? d(r.period_planned_end) : a) : a),
+    d(rows[0].period_planned_end || toYMD(new Date()))
+  );
   // 期間を週グリッドに丸め
   const startWeek = new Date(minStart); startWeek.setDate(startWeek.getDate() - startWeek.getDay());
   const endWeek = new Date(maxEnd); endWeek.setDate(endWeek.getDate() + (6 - endWeek.getDay()));
