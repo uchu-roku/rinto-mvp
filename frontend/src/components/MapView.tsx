@@ -52,23 +52,20 @@ function StatusBar() {
   const [zoom, setZoom] = React.useState(map.getZoom());
   const [online, setOnline] = React.useState<boolean>(navigator.onLine);
 
-  React.useEffect(() => {
-    const onMove = (e: any) => setLatlng(map.mouseEventToLatLng(e.originalEvent));
+  useEffect(() => {
+    const onMove = (e: L.LeafletMouseEvent) => setLatlng(e.latlng);
     const onZoom = () => setZoom(map.getZoom());
-    (map.getContainer() as HTMLElement).addEventListener("mousemove", onMove);
+    map.on("mousemove", onMove);
     map.on("zoomend", onZoom);
-    const onl = () => setOnline(true),
-      off = () => setOnline(false);
-    window.addEventListener("online", onl);
-    window.addEventListener("offline", off);
+    const onl = () => setOnline(true), off = () => setOnline(false);
+    window.addEventListener("online", onl); window.addEventListener("offline", off);
     return () => {
-      (map.getContainer() as HTMLElement).removeEventListener("mousemove", onMove);
+      map.off("mousemove", onMove);
       map.off("zoomend", onZoom);
-      window.removeEventListener("online", onl);
-      window.removeEventListener("offline", off);
+      window.removeEventListener("online", onl); window.removeEventListener("offline", off);
     };
   }, [map]);
-
+  
   return (
     <div
       style={{
@@ -711,7 +708,7 @@ export default function MapView() {
 
   return (
     <div style={{ height: "100%", position: "relative" }}>
-      <MapContainer style={{ height: "100%" }} preferCanvas>
+      <MapContainer bounds={initial} style={{ height: "100%" }} preferCanvas>
         {/* ビュー同期（URLハッシュ） */}
         <ViewHashSync initial={initial} />
 
