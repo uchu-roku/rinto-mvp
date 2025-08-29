@@ -1,6 +1,7 @@
 // frontend/src/components/Reports.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { auth, db, storage } from "../lib/firebase";
+import { authFetch } from "../lib/authFetch";
 import {
   addDoc, collection, onSnapshot, serverTimestamp,
 } from "firebase/firestore";
@@ -13,10 +14,10 @@ import { toast } from "react-hot-toast";
 import { MapContainer, TileLayer, Polyline } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
-// ------------- 型 -------------
+/* ----------------------------- 型 ----------------------------- */
 type LatLng = { lat: number; lng: number; t: number };
 type Photo = { name: string; path: string; url: string; size: number; type: string };
-type Report = {
+type ReportDoc = {
   id: string;
   body: string;
   points: LatLng[];
@@ -26,9 +27,28 @@ type Report = {
   ended_at?: any;
   duration_ms?: number | null;
   author?: string | null;
+  report_id?: string; // ← Functions (/reports) で作成したIDを保持
 };
 
-// ------------- サブ：ミニ地図 -------------
+/* ------------------------- ユーティリティ ------------------------- */
+const toYMD = (d: Date) => d.toISOString().slice(0, 10);
+
+/** ヒュベニの公式（地球半径近似） */
+function distanceKmOf(poly: LatLng[]): number {
+  if (poly.length < 2) return 0;
+  const R = 6371e3; const rad = (x: number) => (x * Math.PI) / 180;
+  let sum = 0;
+  for (let i = 1; i < poly.length; i++) {
+    const a = poly[i - 1], b = poly[i];
+    const dφ = rad(b.lat - a.lat), dλ = rad(b.lng - a.lng);
+    const φ1 = rad(a.lat), φ2 = rad(b.lat);
+    const x = Math.sin(dφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
+    sum += 2 * R * Math.asin(Math.sqrt(x));
+  }
+  return sum / 1000;
+}
+
+/* ------------------------ サブ：ミニ地図 ------------------------ */
 function MiniRouteMap({ pts }: { pts: LatLng[] }) {
   if (!pts.length) {
     return (
@@ -53,7 +73,7 @@ function MiniRouteMap({ pts }: { pts: LatLng[] }) {
   );
 }
 
-// ------------- 本体 -------------
+/* ------------------------------ 本体 ------------------------------ */
 export default function Reports() {
   // 入力
   const [body, setBody] = useState("");
@@ -112,24 +132,11 @@ export default function Reports() {
   }, []);
 
   // 直線合計の距離（km）
-  const distanceKm = useMemo(() => {
-    if (points.length < 2) return 0;
-    const R = 6371e3; const rad = (x: number) => (x * Math.PI) / 180;
-    let sum = 0;
-    for (let i = 1; i < points.length; i++) {
-      const a = points[i - 1], b = points[i];
-      const dφ = rad(b.lat - a.lat), dλ = rad(b.lng - a.lng);
-      const φ1 = rad(a.lat), φ2 = rad(b.lat);
-      const x = Math.sin(dφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
-      sum += 2 * R * Math.asin(Math.sqrt(x));
-    }
-    return sum / 1000;
-  }, [points]);
+  const distanceKm = useMemo(() => distanceKmOf(points), [points]);
 
-  // 一覧
-  const [items, setItems] = useState<Report[]>([]);
+  // 一覧（既存 UI 用の読み取りは Firestore のまま）
+  const [items, setItems] = useState<ReportDoc[]>([]);
   useEffect(() => {
-    // created_at の有無に関係なくクライアント側で並べ替え
     const unsub = onSnapshot(collection(db, "work_reports"), (snap) => {
       const rows = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
       rows.sort((a, b) => (b.created_at?.toMillis?.() || 0) - (a.created_at?.toMillis?.() || 0));
@@ -153,6 +160,14 @@ export default function Reports() {
     try {
       setBusy(true);
       setUploadPct(1);
+
+      // 0) org_id を取得（カスタムクレーム）
+      const token = await user.getIdTokenResult();
+      const orgId = (token.claims as any)?.org_id;
+      if (!orgId) {
+        toast.error("org_id が取得できません。管理者に確認してください。");
+        return;
+      }
 
       // 1) 写真アップロード（Storage）
       const photos: Photo[] = [];
@@ -178,8 +193,43 @@ export default function Reports() {
         });
       }
 
-      // 2) Firestore に保存
-      const duration = startedAt ? Date.now() - startedAt : null;
+      // 2) Functions API: /reports に“設計準拠”の集計値を保存
+      const startMs = startedAt ?? (points[0]?.t ?? Date.now());
+      const endMs = points[points.length - 1]?.t ?? Date.now();
+      const workDate = toYMD(new Date(startMs));
+      const distance = Number(distanceKm.toFixed(3)); // km
+
+      const { id: report_id } = await authFetch<{ id: string }>("/reports", {
+        method: "POST",
+        body: JSON.stringify({
+          org_id: orgId,
+          work_date: workDate,
+          task_code: "現地確認",
+          output_value: distance,
+          unit: "km",
+          note: body.trim(),
+        }),
+      });
+
+      // 3) Functions API: /tracks へルート保存（2点以上のとき）
+      if (points.length >= 2) {
+        const geom = {
+          type: "LineString" as const,
+          coordinates: points.map((p) => [p.lng, p.lat] as [number, number]),
+        };
+        await authFetch("/tracks", {
+          method: "POST",
+          body: JSON.stringify({
+            report_id,
+            geom,
+            start: new Date(startMs).toISOString(),
+            end: new Date(endMs).toISOString(),
+            length_m: Math.round(distance * 1000),
+          }),
+        });
+      }
+
+      // 4) 既存UI用：Firestoreにも従来形式で保存（一覧表示のため）
       await addDoc(collection(db, "work_reports"), {
         body: body.trim(),
         photos,
@@ -187,11 +237,12 @@ export default function Reports() {
         author: user.uid,
         started_at: startedAt ? new Date(startedAt) : null,
         ended_at: new Date(),
-        duration_ms: duration,
+        duration_ms: startedAt ? Date.now() - startedAt : null,
         created_at: serverTimestamp(),
+        report_id, // ← Functions 側のIDを保持しておく
       });
 
-      // 3) クリア
+      // 5) クリア
       setBody(""); setFiles([]); setPoints([]); setStartedAt(null); setUploadPct(0);
       localStorage.removeItem("report_draft");
       toast.success("送信しました");
@@ -292,6 +343,7 @@ export default function Reports() {
 
             <div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>
               位置点 {r.points?.length ?? 0}・写真 {r.photos?.length ?? 0}
+              {r.report_id ? ` ／ report_id: ${r.report_id}` : ""}
             </div>
           </div>
         ))}
