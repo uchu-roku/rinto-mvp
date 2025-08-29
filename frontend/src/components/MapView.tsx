@@ -103,12 +103,12 @@ function ScaleControl() {
   return null;
 }
 
-// ---------------------- 最終表示位置を保存/復元 ----------------------
+// ---------------------- 最終表示位置を保存/復元（URLハッシュ廃止） ----------------------
 const VIEW_KEY = "rinto:last_view";
 function ViewMemory({ initial }: { initial: LatLngBoundsExpression }) {
   const map = useMap();
   useEffect(() => {
-    // 復元
+    // 復元（初回のみ）
     const raw = localStorage.getItem(VIEW_KEY);
     if (raw) {
       try {
@@ -124,7 +124,7 @@ function ViewMemory({ initial }: { initial: LatLngBoundsExpression }) {
     } else {
       map.fitBounds(initial);
     }
-    // 保存
+    // 移動後に保存
     const save = () => {
       const c = map.getCenter();
       const z = map.getZoom();
@@ -481,7 +481,7 @@ function TreesLayer({
     URL.revokeObjectURL(url);
   };
 
-  // L/H/E ショートカット（地図操作はここで処理）
+  // L/H/E ショートカット（地図のみ）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -497,7 +497,7 @@ function TreesLayer({
 
   return (
     <>
-      {/* 左上：表示本数＋集計＋CSV＋現在地/ホーム（UIを1枚に集約して重なり解消） */}
+      {/* 左上：表示本数＋集計＋CSV＋現在地/ホーム（1枚に集約） */}
       <div
         style={{
           position: "absolute",
@@ -602,7 +602,7 @@ export default function MapView() {
     new Set(features.map((f: any) => f.properties?.species).filter(Boolean))
   ) as string[];
 
-  // F / ? ショートカットは親で処理
+  // F / ? ショートカット（親）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -615,9 +615,21 @@ export default function MapView() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // ---- UI重なり対策：Drawツールバーを少し下へずらす ----
+  const drawToolbarShim = `
+    .leaflet-top.leaflet-left .leaflet-draw-toolbar {
+      margin-top: 64px;  /* 左上の操作ボックスと重ならないようオフセット */
+    }
+    @media (max-width: 768px) {
+      .leaflet-top.leaflet-left .leaflet-draw-toolbar { margin-top: 96px; }
+    }
+  `;
+
   return (
     <div style={{ height: "100%", position: "relative" }}>
-      {/* bounds は渡さず、ViewMemory が復元/初期表示を担当 */}
+      <style>{drawToolbarShim}</style>
+
+      {/* MapContainer は固定化。bounds/center/zoom を渡さず、ViewMemory が復元を担当 */}
       <MapContainer style={{ height: "100%" }} preferCanvas>
         {/* 表示位置の保存/復元（URLハッシュ依存を廃止） */}
         <ViewMemory initial={initial} />
