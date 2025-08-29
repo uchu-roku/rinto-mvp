@@ -47,7 +47,7 @@ type Tree = {
 
 // ---------------------- StatusBar（地図用） ----------------------
 function StatusBar() {
-  const map = useMap() as any;
+  const map = useMap();
   const [latlng, setLatlng] = React.useState<{ lat: number; lng: number }>({ lat: 0, lng: 0 });
   const [zoom, setZoom] = React.useState(map.getZoom());
   const [online, setOnline] = React.useState<boolean>(navigator.onLine);
@@ -58,14 +58,16 @@ function StatusBar() {
     map.on("mousemove", onMove);
     map.on("zoomend", onZoom);
     const onl = () => setOnline(true), off = () => setOnline(false);
-    window.addEventListener("online", onl); window.addEventListener("offline", off);
+    window.addEventListener("online", onl);
+    window.addEventListener("offline", off);
     return () => {
       map.off("mousemove", onMove);
       map.off("zoomend", onZoom);
-      window.removeEventListener("online", onl); window.removeEventListener("offline", off);
+      window.removeEventListener("online", onl);
+      window.removeEventListener("offline", off);
     };
   }, [map]);
-  
+
   return (
     <div
       style={{
@@ -90,7 +92,7 @@ function StatusBar() {
   );
 }
 
-// ---------------------- 追加UI：スケールバー ----------------------
+// ---------------------- スケールバー ----------------------
 function ScaleControl() {
   const map = useMap();
   useEffect(() => {
@@ -101,119 +103,37 @@ function ScaleControl() {
   return null;
 }
 
-// ---------------------- 追加UI：URLハッシュ同期 ----------------------
-function ViewHashSync({ initial }: { initial: LatLngBoundsExpression }) {
+// ---------------------- 最終表示位置を保存/復元 ----------------------
+const VIEW_KEY = "rinto:last_view";
+function ViewMemory({ initial }: { initial: LatLngBoundsExpression }) {
   const map = useMap();
   useEffect(() => {
-    // ハッシュがあれば復元、無ければ初期範囲
-    const m = location.hash.match(/^#(\d{1,2})\/(-?\d+\.\d+)\/(-?\d+\.\d+)$/);
-    if (m) {
-      const z = Number(m[1]),
-        lat = Number(m[2]),
-        lng = Number(m[3]);
-      if (Number.isFinite(z) && Number.isFinite(lat) && Number.isFinite(lng)) {
-        map.setView([lat, lng], z);
-      } else {
+    // 復元
+    const raw = localStorage.getItem(VIEW_KEY);
+    if (raw) {
+      try {
+        const { lat, lng, z } = JSON.parse(raw);
+        if (Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(z)) {
+          map.setView([lat, lng], z);
+        } else {
+          map.fitBounds(initial);
+        }
+      } catch {
         map.fitBounds(initial);
       }
     } else {
       map.fitBounds(initial);
     }
-    const onMove = () => {
+    // 保存
+    const save = () => {
       const c = map.getCenter();
       const z = map.getZoom();
-      history.replaceState(null, "", `#${z}/${c.lat.toFixed(5)}/${c.lng.toFixed(5)}`);
+      localStorage.setItem(VIEW_KEY, JSON.stringify({ lat: c.lat, lng: c.lng, z }));
     };
-    map.on("moveend", onMove);
-    return () => map.off("moveend", onMove);
+    map.on("moveend", save);
+    return () => map.off("moveend", save);
   }, [map, initial]);
   return null;
-}
-
-// ---------------------- 追加UI：クイック操作 ----------------------
-function QuickControls({
-  initial,
-  onCsv,
-}: {
-  initial: LatLngBoundsExpression;
-  onCsv: () => void;
-}) {
-  const map = useMap();
-  const accRef = useRef<L.Circle | null>(null);
-  const meRef = useRef<L.CircleMarker | null>(null);
-
-  // locate/go-home のカスタムイベントを拾う
-  useEffect(() => {
-    const locate = () => map.locate({ enableHighAccuracy: true });
-    const home = () => map.fitBounds(initial);
-    window.addEventListener("locate-me", locate as any);
-    window.addEventListener("go-home", home as any);
-    return () => {
-      window.removeEventListener("locate-me", locate as any);
-      window.removeEventListener("go-home", home as any);
-    };
-  }, [map, initial]);
-
-  useEffect(() => {
-    const onFound = (e: L.LocationEvent) => {
-      const ll = e.latlng;
-      const acc = e.accuracy || 30;
-      if (!meRef.current) {
-        meRef.current = L.circleMarker(ll, { radius: 6, color: "#1976d2", weight: 2 }).addTo(map);
-      } else {
-        meRef.current.setLatLng(ll);
-      }
-      if (!accRef.current) {
-        accRef.current = L.circle(ll, {
-          radius: acc,
-          color: "#1976d2",
-          weight: 1,
-          fillColor: "#1976d2",
-          fillOpacity: 0.15,
-        }).addTo(map);
-      } else {
-        accRef.current.setLatLng(ll).setRadius(acc);
-      }
-      map.setView(ll, Math.max(map.getZoom(), 16));
-    };
-    const onErr = (e: any) => alert("位置取得に失敗しました: " + (e?.message || e));
-    map.on("locationfound", onFound);
-    map.on("locationerror", onErr);
-    return () => {
-      map.off("locationfound", onFound);
-      map.off("locationerror", onErr);
-      if (accRef.current) map.removeLayer(accRef.current);
-      if (meRef.current) map.removeLayer(meRef.current);
-    };
-  }, [map]);
-
-  const Btn: React.FC<React.ButtonHTMLAttributes<HTMLButtonElement>> = (props) => (
-    <button
-      {...props}
-      style={{
-        padding: "6px 10px",
-        border: "1px solid #e5e7eb",
-        background: "#fff",
-        borderRadius: 8,
-        boxShadow: "0 1px 2px rgba(0,0,0,.06)",
-        ...props.style,
-      }}
-    />
-  );
-
-  return (
-    <div style={{ position: "absolute", left: 8, top: 60, display: "flex", flexDirection: "column", gap: 6, zIndex: 1000 }}>
-      <Btn title="現在地へ (L)" onClick={() => map.locate({ enableHighAccuracy: true })}>
-        📍
-      </Btn>
-      <Btn title="初期表示に戻る (H)" onClick={() => map.fitBounds(initial)}>
-        🏠
-      </Btn>
-      <Btn title="CSV出力 (E)" onClick={onCsv}>
-        CSV
-      </Btn>
-    </div>
-  );
 }
 
 // ---------------------- 追加UI：ショートカットヘルプ ----------------------
@@ -238,21 +158,11 @@ function ShortcutsHelp({ open, onClose }: { open: boolean; onClose: () => void }
     >
       <div style={{ fontWeight: 700, marginBottom: 6 }}>ショートカット</div>
       <ul style={{ margin: 0, padding: "0 0 0 14px", lineHeight: 1.8 }}>
-        <li>
-          <b>F</b>: 条件検索を開く
-        </li>
-        <li>
-          <b>L</b>: 現在地へ移動
-        </li>
-        <li>
-          <b>H</b>: 初期表示に戻る
-        </li>
-        <li>
-          <b>E</b>: 表示中の単木をCSV出力
-        </li>
-        <li>
-          <b>?</b>: このヘルプを表示/閉じる
-        </li>
+        <li><b>F</b>: 条件検索を開く</li>
+        <li><b>L</b>: 現在地へ移動</li>
+        <li><b>H</b>: 初期表示に戻る</li>
+        <li><b>E</b>: 表示中の単木をCSV出力</li>
+        <li><b>?</b>: このヘルプを表示/閉じる</li>
       </ul>
     </div>
   );
@@ -262,9 +172,11 @@ function ShortcutsHelp({ open, onClose }: { open: boolean; onClose: () => void }
 function TreesLayer({
   filters,
   onFeaturesChange,
+  initialBounds,
 }: {
   filters: Filters;
   onFeaturesChange: (features: any[]) => void;
+  initialBounds: LatLngBoundsExpression;
 }) {
   const map = useMap();
 
@@ -327,16 +239,13 @@ function TreesLayer({
     });
   };
 
-  // 射線法（多角形内判定）
+  // 多角形内判定
   const pointInPolygon = (point: [number, number], vs: [number, number][]) => {
-    const x = point[1],
-      y = point[0];
+    const x = point[1], y = point[0];
     let inside = false;
     for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-      const xi = vs[i][1],
-        yi = vs[i][0];
-      const xj = vs[j][1],
-        yj = vs[j][0];
+      const xi = vs[i][1], yi = vs[i][0];
+      const xj = vs[j][1], yj = vs[j][0];
       const denom = yj - yi || 1e-12;
       const intersect = (yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / denom + xi;
       if (intersect) inside = !inside;
@@ -528,7 +437,7 @@ function TreesLayer({
     };
     reload();
     map.on("moveend", debounced);
-    map.on("zoomend", debounced); // 追加
+    map.on("zoomend", debounced);
     return () => {
       clearTimeout(t);
       map.off("moveend", debounced);
@@ -572,16 +481,23 @@ function TreesLayer({
     URL.revokeObjectURL(url);
   };
 
-  // 外部（ショートカットやクイックボタン）からCSV出力をトリガー可能に
+  // L/H/E ショートカット（地図操作はここで処理）
   useEffect(() => {
-    const handler = () => exportCsv();
-    window.addEventListener("trees:exportCsv", handler as any);
-    return () => window.removeEventListener("trees:exportCsv", handler as any);
-  }, []);
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || (e as any).isComposing) return;
+      const k = e.key.toLowerCase();
+      if (k === "l") map.locate({ enableHighAccuracy: true });
+      if (k === "h") map.fitBounds(initialBounds);
+      if (k === "e") exportCsv();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [map, initialBounds]);
 
   return (
     <>
-      {/* 左上：表示本数＋集計ボタン＋CSV */}
+      {/* 左上：表示本数＋集計＋CSV＋現在地/ホーム（UIを1枚に集約して重なり解消） */}
       <div
         style={{
           position: "absolute",
@@ -616,7 +532,9 @@ function TreesLayer({
         >
           現在範囲で集計
         </button>
-        <button onClick={exportCsv}>CSV出力</button>
+        <button onClick={exportCsv} title="表示中の単木をCSV出力 (E)">CSV出力</button>
+        <button onClick={() => map.locate({ enableHighAccuracy: true })} title="現在地へ移動 (L)">📍</button>
+        <button onClick={() => map.fitBounds(initialBounds)} title="初期表示に戻る (H)">🏠</button>
       </div>
 
       {/* 左下：描画範囲の集計結果 */}
@@ -633,15 +551,9 @@ function TreesLayer({
           zIndex: 1000,
         }}
       >
-        <div>
-          選択本数: <b>{areaStats.count}</b>
-        </div>
-        <div>
-          平均DBH: <b>{areaStats.avgDbh ?? "—"}</b>
-        </div>
-        <div>
-          平均樹高: <b>{areaStats.avgHeight ?? "—"}</b>
-        </div>
+        <div>選択本数: <b>{areaStats.count}</b></div>
+        <div>平均DBH: <b>{areaStats.avgDbh ?? "—"}</b></div>
+        <div>平均樹高: <b>{areaStats.avgHeight ?? "—"}</b></div>
         <div style={{ marginTop: 6, display: "flex", gap: 8 }}>
           <button
             onClick={() => {
@@ -690,16 +602,13 @@ export default function MapView() {
     new Set(features.map((f: any) => f.properties?.species).filter(Boolean))
   ) as string[];
 
-  // キーボードショートカット
+  // F / ? ショートカットは親で処理
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || (e as any).isComposing) return;
       const k = e.key.toLowerCase();
       if (k === "f") setDrawerOpen(true);
-      if (k === "l") window.dispatchEvent(new Event("locate-me"));
-      if (k === "h") window.dispatchEvent(new Event("go-home"));
-      if (k === "e") window.dispatchEvent(new Event("trees:exportCsv"));
       if (k === "?") setHelpOpen((v) => !v);
     };
     window.addEventListener("keydown", onKey);
@@ -708,9 +617,10 @@ export default function MapView() {
 
   return (
     <div style={{ height: "100%", position: "relative" }}>
-      <MapContainer bounds={initial} style={{ height: "100%" }} preferCanvas>
-        {/* ビュー同期（URLハッシュ） */}
-        <ViewHashSync initial={initial} />
+      {/* bounds は渡さず、ViewMemory が復元/初期表示を担当 */}
+      <MapContainer style={{ height: "100%" }} preferCanvas>
+        {/* 表示位置の保存/復元（URLハッシュ依存を廃止） */}
+        <ViewMemory initial={initial} />
 
         {/* スケールバー */}
         <ScaleControl />
@@ -727,14 +637,8 @@ export default function MapView() {
         )}
 
         {/* 単木レイヤ＋ステータスバー */}
-        <TreesLayer filters={filters} onFeaturesChange={setFeatures} />
+        <TreesLayer filters={filters} onFeaturesChange={setFeatures} initialBounds={initial} />
         <StatusBar />
-
-        {/* クイック操作（現在地・ホーム・CSV） */}
-        <QuickControls
-          initial={initial}
-          onCsv={() => window.dispatchEvent(new Event("trees:exportCsv"))}
-        />
       </MapContainer>
 
       {/* 右下：凡例 */}
@@ -798,7 +702,7 @@ export default function MapView() {
       {/* ショートカットヘルプ */}
       <ShortcutsHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
 
-      {/* 検索ドロワー（今表示中の features をCSV＆統計に活用） */}
+      {/* 検索ドロワー */}
       <SearchDrawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
