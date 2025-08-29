@@ -1,15 +1,11 @@
 // frontend/src/components/MapView.tsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { MapContainer, TileLayer, useMap } from "react-leaflet";
 import L, { LatLngBoundsExpression } from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "leaflet-draw/dist/leaflet.draw.css";
 import "leaflet-draw";
 import { createRoot } from "react-dom/client";
-
-// ← Firestore直読みは撤去
-// import { collection, getDocs, limit, query } from "firebase/firestore";
-// import { db } from "../lib/firebase";
 
 import { authFetch } from "../lib/authFetch";
 
@@ -19,7 +15,7 @@ import OpacitySlider from "./map/OpacitySlider";
 import TreePopup from "./map/TreePopup";
 import SearchDrawer, { type Filters } from "./search/SearchDrawer";
 
-// ── 共通定数 ──────────────────────────────────────────────────────
+/* ----------------------------- 定数 ----------------------------- */
 const SPECIES_COLORS: Record<string, string> = {
   スギ: "#3b7",
   ヒノキ: "#2a6",
@@ -29,16 +25,15 @@ const SPECIES_COLORS: Record<string, string> = {
   その他: "#888",
 };
 
-// 画面上部のアプリヘッダー高さ相当（重なり回避用）
 const HEADER_OFFSET = 56;
 
-// 初期表示範囲（函館周辺の例）
+/** 初期表示範囲（函館周辺の例） */
 const INITIAL_BOUNDS: LatLngBoundsExpression = [
   [41.7, 140.6],
   [41.9, 140.9],
 ] as const;
 
-// ── 型 ─────────────────────────────────────────────────────────
+/* ----------------------------- 型 ------------------------------ */
 type Tree = {
   id: string;
   lat: number;
@@ -49,7 +44,6 @@ type Tree = {
   volume?: number | null;
 };
 
-// APIの戻りに合わせた緩い型（lat/lng, location, GeoJSONの3系統に対応）
 type ApiTree = {
   id?: string;
   tree_id?: string;
@@ -63,7 +57,7 @@ type ApiTree = {
   volume_m3?: number;
 };
 
-// ── ユーティリティ（画面幅監視） ───────────────────────────────
+/* --------------------------- フック/ユーティリティ --------------------------- */
 function useWindowSize() {
   const [w, setW] = useState<number>(typeof window === "undefined" ? 1024 : window.innerWidth);
   useEffect(() => {
@@ -74,7 +68,6 @@ function useWindowSize() {
   return w;
 }
 
-// ── ビュー記憶（戻り防止） ─────────────────────────────────────
 const VIEW_KEY = "rinto:last_view";
 function ViewMemory({ initial }: { initial: LatLngBoundsExpression }) {
   const map = useMap();
@@ -111,7 +104,6 @@ function ViewMemory({ initial }: { initial: LatLngBoundsExpression }) {
   return null;
 }
 
-// ── ステータスバー ──────────────────────────────────────────────
 function StatusBar() {
   const map = useMap();
   const [latlng, setLatlng] = useState<{ lat: number; lng: number }>({ lat: 0, lng: 0 });
@@ -158,18 +150,18 @@ function StatusBar() {
   );
 }
 
-// ── スケールバー ──────────────────────────────────────────────
 function ScaleControl() {
   const map = useMap();
   useEffect(() => {
-    const ctrl = L.control.scale({ metric: true, imperial: false });
+    // 左下のカードと重なるのを避けるため右下に配置
+    const ctrl = L.control.scale({ position: "bottomright", metric: true, imperial: false });
     ctrl.addTo(map);
     return () => (map as any).removeControl(ctrl);
   }, [map]);
   return null;
 }
 
-// ── API: trees/search（Filters → クエリ文字列） ───────────────
+/* --------------------------- API --------------------------- */
 async function fetchTreesByApi(f: Filters): Promise<Tree[]> {
   const qs = new URLSearchParams();
   if (f.species?.length) qs.set("species", f.species.join(","));
@@ -179,10 +171,10 @@ async function fetchTreesByApi(f: Filters): Promise<Tree[]> {
   if (f.maxDbh != null) qs.set("dbh_max", String(f.maxDbh));
   qs.set("limit", String(f.limit ?? 1000));
 
-  const { items } = await authFetch<{ items: ApiTree[] }>(`/trees/search?${qs.toString()}`);
+  // 安全側に /api を明示
+  const { items } = await authFetch<{ items: ApiTree[] }>(`/api/trees/search?${qs.toString()}`);
 
   const norm = (p: ApiTree): Tree | null => {
-    // 位置抽出：lat/lng or location or GeoJSON Point
     let lat = p.lat, lng = p.lng;
     if ((lat == null || lng == null) && p.location) {
       lat = p.location.lat; lng = p.location.lng;
@@ -205,17 +197,19 @@ async function fetchTreesByApi(f: Filters): Promise<Tree[]> {
   return items.map(norm).filter((t): t is Tree => !!t);
 }
 
-// ── TreesLayer（単木描画 + 集計 + 左上カード） ────────────────
+/* --------------------------- TreesLayer --------------------------- */
 function TreesLayer({
   filters,
   onFeaturesChange,
   initialBounds,
   leftOffset,
+  registerExport, // 親から渡されるCSVエクスポート登録
 }: {
   filters: Filters;
   onFeaturesChange: (features: any[]) => void;
   initialBounds: LatLngBoundsExpression;
   leftOffset: number;
+  registerExport: (fn: () => void) => void;
 }) {
   const map = useMap();
 
@@ -234,8 +228,7 @@ function TreesLayer({
     avgHeight: null,
   });
 
-  // レイヤ再構築（API → 画面範囲で絞り込み）
-  const reload = async () => {
+  const reload = useCallback(async () => {
     setSelected(null);
     setLoading(true);
     try {
@@ -322,7 +315,7 @@ function TreesLayer({
     } finally {
       setLoading(false);
     }
-  };
+  }, [filters, map, onFeaturesChange, selectedId]);
 
   // 選択ハイライト更新
   useEffect(() => {
@@ -344,6 +337,7 @@ function TreesLayer({
   // 描画（多角形/矩形）で集計
   useEffect(() => {
     const drawnItems = new L.FeatureGroup();
+    drawGroupRef.current = drawnItems; // ← これが無いとクリアが効かない
     const drawControl = new (L.Control as any).Draw({
       draw: { polygon: true, rectangle: true, polyline: false, circle: false, marker: false, circlemarker: false },
       edit: { featureGroup: drawnItems, edit: false, remove: true },
@@ -358,7 +352,6 @@ function TreesLayer({
         if (shape.getBounds) return shape.getBounds().contains(L.latLng(lat, lng));
         if (shape.getLatLngs) {
           const latlngs = (shape.getLatLngs()?.[0] ?? []) as L.LatLng[];
-          // 射線法
           const poly: [number, number][] = latlngs.map((ll) => [ll.lat, ll.lng]);
           let x = lng, y = lat, ok = false;
           for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -392,7 +385,6 @@ function TreesLayer({
 
     const onDeleted = () => setAreaStats({ count: 0, avgDbh: null, avgHeight: null });
 
-    // 追加/削除ハンドラ登録
     map.addLayer(drawnItems);
     map.addControl(drawControl);
     map.on((L as any).Draw.Event.CREATED, onCreated);
@@ -411,7 +403,7 @@ function TreesLayer({
     let t: any;
     const debounced = () => {
       clearTimeout(t);
-      t = setTimeout(reload, 250); // 体感改善のため 250ms
+      t = setTimeout(reload, 250);
     };
     reload();
     map.on("moveend", debounced);
@@ -425,11 +417,10 @@ function TreesLayer({
         layerRef.current = null;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters]);
+  }, [reload, map]);
 
-  // CSV出力（現在表示レイヤのGeoJSONをそのまま出力）
-  const exportCsv = () => {
+  // CSV出力（現在のGeoJSONをそのままCSV化）
+  const exportCsv = useCallback(() => {
     if (!layerRef.current) return;
     const gj = layerRef.current.toGeoJSON() as any;
     const rows = (gj.features || []).map((f: any) => {
@@ -457,9 +448,13 @@ function TreesLayer({
     a.download = "trees.csv";
     a.click();
     URL.revokeObjectURL(url);
-  };
+  }, []);
 
-  // ── UI：左上カード（ヘッダー下・ドロワー退避） ───────────────
+  // 親からショートカット用関数を登録させる
+  useEffect(() => {
+    registerExport(exportCsv);
+  }, [exportCsv, registerExport]);
+
   const topOffset = HEADER_OFFSET + 8;
 
   return (
@@ -494,27 +489,19 @@ function TreesLayer({
             const avg_dbh = avg(num(props.map((p: any) => p.dbh_cm)));
             const sum_volume = num(props.map((p: any) => p.volume_m3)).reduce((a: number, b: number) => a + b, 0);
             alert(
-              `本数:${count}\n平均樹高:${avg_height ? avg_height.toFixed(2) : "—"}m\n平均DBH:${
-                avg_dbh ? avg_dbh.toFixed(1) : "—"
-              }cm\n総材積:${sum_volume ? sum_volume.toFixed(2) : "—"}m³`
+              `本数:${count}\n平均樹高:${avg_height ? avg_height.toFixed(2) : "—"}m\n平均DBH:${avg_dbh ? avg_dbh.toFixed(1) : "—"}cm\n総材積:${sum_volume ? sum_volume.toFixed(2) : "—"}m³`
             );
           }}
           title="現在の表示範囲を集計"
         >
           現在範囲で集計
         </button>
-        <button onClick={exportCsv} title="表示中の単木をCSV出力 (E)" aria-label="CSV出力">
-          CSV出力
-        </button>
-        <button onClick={() => map.locate({ enableHighAccuracy: true })} title="現在地へ移動 (L)" aria-label="現在地へ">
-          📍
-        </button>
-        <button onClick={() => map.fitBounds(initialBounds)} title="初期表示に戻る (H)" aria-label="初期表示に戻る">
-          🏠
-        </button>
+        <button onClick={exportCsv} title="表示中の単木をCSV出力 (E)" aria-label="CSV出力">CSV出力</button>
+        <button onClick={() => map.locate({ enableHighAccuracy: true })} title="現在地へ移動 (L)" aria-label="現在地へ">📍</button>
+        <button onClick={() => map.fitBounds(initialBounds)} title="初期表示に戻る (H)" aria-label="初期表示に戻る">🏠</button>
       </div>
 
-      {/* 左下：描画範囲の集計結果（ドロワーに応じて右へ退避） */}
+      {/* 左下：描画範囲の集計 */}
       <div
         style={{
           position: "absolute",
@@ -546,7 +533,7 @@ function TreesLayer({
         </div>
       </div>
 
-      {/* Draw ツールバーのオフセット（ヘッダー + ドロワー） */}
+      {/* Drawツールバーのオフセット */}
       <style>{`
         .leaflet-top.leaflet-left .leaflet-draw-toolbar {
           margin-top: ${HEADER_OFFSET + 8}px;
@@ -557,13 +544,12 @@ function TreesLayer({
         }
       `}</style>
 
-      {/* 単木詳細 */}
       <TreeDetail tree={selected} onClose={() => setSelected(null)} />
     </>
   );
 }
 
-// ── 親コンポーネント ───────────────────────────────────────────
+/* --------------------------- 親コンポーネント --------------------------- */
 export default function MapView() {
   const winW = useWindowSize();
 
@@ -575,10 +561,18 @@ export default function MapView() {
     { id: "std", label: "標準地図", active: true },
     { id: "photo", label: "航空写真", active: false },
   ]);
-  const [overlays, setOverlays] = useState([{ id: "slope", label: "傾斜", visible: false }]);
+
+  // 追加オーバーレイもUIに出す
+  const [overlays, setOverlays] = useState([
+    { id: "slope", label: "傾斜", visible: false },
+    { id: "dem", label: "DEM", visible: false },
+    { id: "contour", label: "等高線", visible: false },
+    { id: "canopy_surface", label: "樹冠表面", visible: false },
+  ]);
+
   const activeBase = base.find((b) => b.active)?.id ?? "std";
 
-  // ドロワー・検索
+  // ドロワー/検索
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [features, setFeatures] = useState<any[]>([]);
   const [filters, setFilters] = useState<Filters>({});
@@ -589,7 +583,13 @@ export default function MapView() {
     [features]
   );
 
-  // キーショートカット（UI系）
+  // CSVショートカット（TreesLayer側の関数をここに登録）
+  const exportCsvRef = useRef<() => void>();
+  const registerExport = useCallback((fn: () => void) => {
+    exportCsvRef.current = fn;
+  }, []);
+
+  // キーショートカット
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -597,26 +597,22 @@ export default function MapView() {
       const k = e.key.toLowerCase();
       if (k === "f") setDrawerOpen(true);
       if (k === "?") setHelpOpen((v) => !v);
-      if (k === "e") {
-        // CSV出力は TreesLayer 内のボタンに寄せる想定（ここでは何もしない）
-      }
+      if (k === "e") exportCsvRef.current?.();
+      if (k === "h") localStorage.removeItem(VIEW_KEY); // H: 初期表示に戻る前に記憶を消すと復元ループ回避が明確
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // ドロワーの実効幅（重なり回避用）。モバイルはオーバーレイ表示が多いので退避なし。
+  // ドロワー幅（衝突回避）
   const drawerWidth = useMemo(() => {
     if (!drawerOpen) return 0;
-    if (winW < 900) return 0; // スモール画面はオーバーレイ想定：退避しない
-    // デスクトップ：画面幅の約 26% を目安に 300〜380px
+    if (winW < 900) return 0;
     return Math.max(300, Math.min(380, Math.round(winW * 0.26)));
   }, [drawerOpen, winW]);
 
-  // 左系UIのオフセット（ヘッダー分 + ドロワー分）
   const leftOffset = 8 + (drawerWidth ? drawerWidth + 12 : 0);
 
-  // ベースCSS（Leafletコントロールと自前UIの干渉防止）
   const baseToolbarShim = `
     .leaflet-control-container { pointer-events: none; }
     .leaflet-control { pointer-events: auto; }
@@ -627,7 +623,7 @@ export default function MapView() {
   // タイルレイヤURLを API から取得（/config/layers）
   const [layerConf, setLayerConf] = useState<any>(null);
   useEffect(() => {
-    authFetch<{ layers: any }>("/config/layers")
+    authFetch<{ layers: any }>("/api/config/layers")
       .then((r) => setLayerConf(r.layers || {}))
       .catch(() => setLayerConf({}));
   }, []);
@@ -636,16 +632,11 @@ export default function MapView() {
     <div style={{ height: "100%", position: "relative" }}>
       <style>{baseToolbarShim}</style>
 
-      <MapContainer
-        style={{ height: "100%" }}
-        preferCanvas
-        center={[43.0621, 141.3544]}
-        zoom={16}
-      >
+      <MapContainer style={{ height: "100%" }} preferCanvas center={[43.0621, 141.3544]} zoom={16}>
         <ViewMemory initial={INITIAL_BOUNDS} />
         <ScaleControl />
 
-        {/* 背景ベース切り替え */}
+        {/* 背景ベース */}
         {activeBase === "std" && (
           <TileLayer url="https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png" attribution="&copy; 国土地理院" />
         )}
@@ -656,9 +647,18 @@ export default function MapView() {
           />
         )}
 
-        {/* オーバーレイ（傾斜） */}
+        {/* オーバーレイ */}
         {overlays.find((o) => o.id === "slope")?.visible && layerConf?.slope && (
           <TileLayer url={layerConf.slope} opacity={opacity} attribution="Slope" />
+        )}
+        {overlays.find((o) => o.id === "dem")?.visible && layerConf?.dem && (
+          <TileLayer url={layerConf.dem} opacity={opacity} attribution="DEM" />
+        )}
+        {overlays.find((o) => o.id === "contour")?.visible && layerConf?.contour && (
+          <TileLayer url={layerConf.contour} opacity={opacity} attribution="Contour" />
+        )}
+        {overlays.find((o) => o.id === "canopy_surface")?.visible && layerConf?.canopy_surface && (
+          <TileLayer url={layerConf.canopy_surface} opacity={opacity} attribution="Canopy surface" />
         )}
 
         <TreesLayer
@@ -666,11 +666,12 @@ export default function MapView() {
           onFeaturesChange={setFeatures}
           initialBounds={INITIAL_BOUNDS}
           leftOffset={leftOffset}
+          registerExport={registerExport}
         />
         <StatusBar />
       </MapContainer>
 
-      {/* 右下：凡例（簡易） */}
+      {/* 右下：凡例 */}
       <div
         style={{
           position: "absolute",
@@ -729,7 +730,7 @@ export default function MapView() {
         }
       />
 
-      {/* ショートカットヘルプ（ヘッダー分下げ） */}
+      {/* ショートカットヘルプ */}
       {helpOpen && (
         <div
           onClick={() => setHelpOpen(false)}
