@@ -1,23 +1,20 @@
 // frontend/src/components/Plans.tsx
-import React, { useEffect, useMemo, useState } from "react";
-import { db } from "../lib/firebase";
-import {
-  addDoc, collection, deleteDoc, doc, onSnapshot,
-  serverTimestamp, updateDoc
-} from "firebase/firestore";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { auth } from "../lib/firebase";
+import { authFetch } from "../lib/authFetch";
 
-// 既存スキーマに合わせた型（status は任意）
+// サーバーの Plan スキーマに合わせた型
 type Plan = {
   id: string;
   name: string;
-  task_type: string;
+  task_type?: string;
   assignee?: string;
-  period_planned_start?: string; // YYYY-MM-DD
-  period_planned_end?: string;   // YYYY-MM-DD
-  status_pct?: number;           // 0..100
-  status?: "計画" | "実施中" | "完了"; // ない場合は pct から推定
+  period_from?: string; // YYYY-MM-DD
+  period_to?: string;   // YYYY-MM-DD
+  status_pct?: number;  // 0..100
   created_at?: any;
 };
+
 type ViewMode = "table" | "kanban" | "gantt";
 
 // util
@@ -25,62 +22,108 @@ const clamp = (n: number, a = 0, b = 100) => Math.min(b, Math.max(a, n));
 const fmt = (s?: string) => (s || "—");
 const day = (s: string) => new Date(s + "T00:00:00");
 const toYMD = (d: Date) => d.toISOString().slice(0, 10);
-const inferStatus = (p: Plan): Plan["status"] =>
-  p.status || ((p.status_pct ?? 0) >= 100 ? "完了" : (p.status_pct ?? 0) > 0 ? "実施中" : "計画");
+const inferStatus = (p: Plan) => ((p.status_pct ?? 0) >= 100 ? "完了" : (p.status_pct ?? 0) > 0 ? "実施中" : "計画");
 
-// ================== 本体 ==================
 export default function Plans() {
   const [view, setView] = useState<ViewMode>("table");
   const [items, setItems] = useState<Plan[]>([]);
   const [busy, setBusy] = useState(false);
+  const [orgId, setOrgId] = useState<string | undefined>(undefined);
 
-  // 追加フォーム（既存フィールド名）
-  const [f, setF] = useState<Partial<Plan>>({
-    name: "", task_type: "", assignee: "", period_planned_start: "", period_planned_end: "", status_pct: 0, status: "計画"
+  // 追加フォーム
+  const [f, setF] = useState<Partial<Plan> & { task_type?: string; assignee?: string }>({
+    name: "", task_type: "", assignee: "", period_from: "", period_to: "", status_pct: 0,
   });
 
-  // Firestore購読（created_at の有無に関わらずクライアント側で並べ替え）
+  // 初期ロード：組織ID（カスタムクレーム）と計画一覧
   useEffect(() => {
-    const refCol = collection(db, "plans");
-    const unsub = onSnapshot(refCol, (snap) => {
-      const rows = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
-      rows.sort((a, b) => (b.created_at?.toMillis?.() || 0) - (a.created_at?.toMillis?.() || 0));
-      setItems(rows);
-    });
-    return () => unsub();
+    (async () => {
+      const tr = await auth.currentUser?.getIdTokenResult();
+      setOrgId((tr?.claims as any)?.org_id);
+      await reload();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  async function reload() {
+    const { items } = await authFetch<{ items: any[] }>("/plans?limit=200");
+    // APIの戻り → UI用に整形（最低限のキーだけ取る）
+    const rows: Plan[] = items.map((x) => ({
+      id: String(x.id),
+      name: String(x.name ?? ""),
+      task_type: x.task_type ?? "",
+      assignee: x.assignee ?? "",
+      period_from: x.period_from ?? "",
+      period_to: x.period_to ?? "",
+      status_pct: typeof x.status_pct === "number" ? x.status_pct : 0,
+      created_at: x.created_at,
+    }));
+    // created_at desc
+    rows.sort((a, b) => (b.created_at?.seconds || 0) - (a.created_at?.seconds || 0));
+    setItems(rows);
+  }
+
+  // 追加
   const add = async () => {
     if (!f.name?.trim() || !f.task_type?.trim()) return alert("名称と作業内容は必須です");
+    if (!orgId) return alert("org_id が取得できません。再ログインしてください。");
     setBusy(true);
     try {
-      await addDoc(collection(db, "plans"), {
-        name: f.name?.trim(),
-        task_type: f.task_type?.trim(),
-        assignee: f.assignee || "",
-        period_planned_start: f.period_planned_start || "",
-        period_planned_end: f.period_planned_end || "",
-        status_pct: clamp(Number(f.status_pct ?? 0)),
-        status: (f.status as any) || "計画",
-        created_at: serverTimestamp(),
+      await authFetch("/plans", {
+        method: "POST",
+        body: JSON.stringify({
+          org_id: orgId,
+          name: f.name?.trim(),
+          task_type: f.task_type?.trim(),
+          assignee: f.assignee || "",
+          period_from: f.period_from || "",
+          period_to: f.period_to || "",
+          status_pct: clamp(Number(f.status_pct ?? 0)),
+        }),
       });
-      setF({ name: "", task_type: "", assignee: "", period_planned_start: "", period_planned_end: "", status_pct: 0, status: "計画" });
+      setF({ name: "", task_type: "", assignee: "", period_from: "", period_to: "", status_pct: 0 });
+      await reload();
     } catch (e: any) {
       alert("保存に失敗しました: " + (e?.message || e));
       console.error(e);
     } finally { setBusy(false); }
   };
 
-  const update = (id: string, patch: Partial<Plan>) =>
-    updateDoc(doc(db, "plans", id), patch as any);
+  // 更新（楽観的＋デバウンス）
+  const timers = useRef<Map<string, number>>(new Map());
+  async function patchPlan(id: string, patch: Partial<Plan>) {
+    // 楽観的更新
+    setItems((arr) => arr.map((p) => (p.id === id ? { ...p, ...patch } : p)));
 
-  const remove = async (id: string) => {
-    if (confirm("削除しますか？")) await deleteDoc(doc(db, "plans", id));
+    // サーバへ送るキーだけ抽出（サーバ側で許可しているフィールド）
+    const ALLOWED: (keyof Plan)[] = ["status_pct", "assignee", "task_type", "period_from", "period_to"];
+    const body: Record<string, any> = {};
+    for (const k of ALLOWED) if (k in patch) body[k] = (patch as any)[k];
+
+    // デバウンス送信
+    const prev = timers.current.get(id);
+    if (prev) window.clearTimeout(prev);
+    const h = window.setTimeout(async () => {
+      try {
+        await authFetch(`/plans/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+      } catch (e) {
+        console.error(e);
+        // 失敗時は最新を再取得
+        await reload();
+      }
+      timers.current.delete(id);
+    }, 400);
+    timers.current.set(id, h);
+  }
+
+  // 削除（API未実装のため無効化）
+  const remove = async (_id: string) => {
+    alert("削除は現在未対応です（要件に応じて Functions 側へ DELETE を追加してください）");
   };
 
   // 絞り込み
   const [qtext, setQtext] = useState("");
-  const [qstatus, setQstatus] = useState<"" | NonNullable<Plan["status"]>>("");
+  const [qstatus, setQstatus] = useState<"" | "計画" | "実施中" | "完了">("");
   const [qowner, setQowner] = useState("");
   const owners = useMemo(() => Array.from(new Set(items.map(i => i.assignee).filter(Boolean))).sort(), [items]);
 
@@ -102,11 +145,11 @@ export default function Plans() {
         <input placeholder="名称" value={f.name || ""} onChange={e => setF(s => ({ ...s, name: e.target.value }))} />
         <input placeholder="作業内容" value={f.task_type || ""} onChange={e => setF(s => ({ ...s, task_type: e.target.value }))} />
         <input placeholder="担当" value={f.assignee || ""} onChange={e => setF(s => ({ ...s, assignee: e.target.value }))} />
-        <input type="date" value={f.period_planned_start || ""} onChange={e => setF(s => ({ ...s, period_planned_start: e.target.value }))} />
-        <input type="date" value={f.period_planned_end || ""} onChange={e => setF(s => ({ ...s, period_planned_end: e.target.value }))} />
+        <input type="date" value={f.period_from || ""} onChange={e => setF(s => ({ ...s, period_from: e.target.value }))} />
+        <input type="date" value={f.period_to || ""} onChange={e => setF(s => ({ ...s, period_to: e.target.value }))} />
         <input type="number" min={0} max={100} value={f.status_pct ?? 0}
                onChange={e => setF(s => ({ ...s, status_pct: clamp(Number(e.target.value)) }))} />
-        <button onClick={add} disabled={busy}>追加</button>
+        <button onClick={add} disabled={busy || !orgId}>追加</button>
       </div>
 
       {/* フィルタ & ビュー切替 */}
@@ -129,14 +172,14 @@ export default function Plans() {
         </div>
       </div>
 
-      {view === "table" && <TableView rows={filtered} onUpdate={update} onRemove={remove} />}
-      {view === "kanban" && <KanbanView rows={filtered} onUpdate={update} />}
+      {view === "table" && <TableView rows={filtered} onUpdate={patchPlan} onRemove={remove} />}
+      {view === "kanban" && <KanbanView rows={filtered} onUpdate={patchPlan} />}
       {view === "gantt" && <GanttMini rows={filtered} />}
     </div>
   );
 }
 
-// ===== Table View =====
+/* ========================= Table View ========================= */
 function TableView({ rows, onUpdate, onRemove }:
   { rows: Plan[]; onUpdate: (id: string, patch: Partial<Plan>) => any; onRemove: (id: string) => any; }) {
 
@@ -159,12 +202,18 @@ function TableView({ rows, onUpdate, onRemove }:
               <input value={draft.name || ""} onChange={e => setDraft(s => ({ ...s, name: e.target.value }))} />
               <input value={draft.task_type || ""} onChange={e => setDraft(s => ({ ...s, task_type: e.target.value }))} />
               <input value={draft.assignee || ""} onChange={e => setDraft(s => ({ ...s, assignee: e.target.value }))} />
-              <input type="date" value={draft.period_planned_start || ""} onChange={e => setDraft(s => ({ ...s, period_planned_start: e.target.value }))} />
-              <input type="date" value={draft.period_planned_end || ""} onChange={e => setDraft(s => ({ ...s, period_planned_end: e.target.value }))} />
+              <input type="date" value={draft.period_from || ""} onChange={e => setDraft(s => ({ ...s, period_from: e.target.value }))} />
+              <input type="date" value={draft.period_to || ""} onChange={e => setDraft(s => ({ ...s, period_to: e.target.value }))} />
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <input type="range" min={0} max={100} value={draft.status_pct ?? 0}
                        onChange={e => setDraft(s => ({ ...s, status_pct: clamp(Number(e.target.value)) }))} />
-                <select value={draft.status || inferStatus(r)} onChange={e => setDraft(s => ({ ...s, status: e.target.value as any }))}>
+                <select
+                  value={inferStatus({ ...r, ...draft })}
+                  onChange={e => {
+                    const v = e.target.value as "計画" | "実施中" | "完了";
+                    const pct = v === "計画" ? 0 : v === "完了" ? 100 : Math.max(1, r.status_pct ?? 50);
+                    setDraft(s => ({ ...s, status_pct: pct }));
+                  }}>
                   <option value="計画">計画</option><option value="実施中">実施中</option><option value="完了">完了</option>
                 </select>
               </div>
@@ -178,8 +227,8 @@ function TableView({ rows, onUpdate, onRemove }:
               <div style={{ fontWeight: 600 }}>{r.name || "—"}</div>
               <div>{r.task_type || "—"}</div>
               <div>{r.assignee || "—"}</div>
-              <div>{fmt(r.period_planned_start)}</div>
-              <div>{fmt(r.period_planned_end)}</div>
+              <div>{fmt(r.period_from)}</div>
+              <div>{fmt(r.period_to)}</div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <div style={{ width: 80 }}>
                   <input
@@ -187,13 +236,19 @@ function TableView({ rows, onUpdate, onRemove }:
                     onChange={e => onUpdate(r.id, { status_pct: clamp(Number(e.target.value)) })}
                   />
                 </div>
-                <select value={inferStatus(r)} onChange={e => onUpdate(r.id, { status: e.target.value as any })}>
+                <select
+                  value={inferStatus(r)}
+                  onChange={e => {
+                    const v = e.target.value as "計画" | "実施中" | "完了";
+                    const pct = v === "計画" ? 0 : v === "完了" ? 100 : Math.max(1, r.status_pct ?? 50);
+                    onUpdate(r.id, { status_pct: pct });
+                  }}>
                   <option value="計画">計画</option><option value="実施中">実施中</option><option value="完了">完了</option>
                 </select>
               </div>
               <div style={{ display: "flex", gap: 6 }}>
                 <button onClick={() => startEdit(r)}>編集</button>
-                <button onClick={() => onRemove(r.id)}>削除</button>
+                <button onClick={() => onRemove(r.id)} disabled>削除</button>
               </div>
             </>
           )}
@@ -204,19 +259,15 @@ function TableView({ rows, onUpdate, onRemove }:
   );
 }
 
-// ===== Kanban View =====
+/* ========================= Kanban View ========================= */
 function KanbanView({ rows, onUpdate }: { rows: Plan[]; onUpdate: (id: string, patch: Partial<Plan>) => any; }) {
-  const cols: NonNullable<Plan["status"]>[] = ["計画", "実施中", "完了"];
+  const cols: Array<"計画" | "実施中" | "完了"> = ["計画", "実施中", "完了"];
 
   const move = (r: Plan, dir: -1 | 1) => {
     const idx = cols.indexOf(inferStatus(r));
     const next = cols[Math.min(cols.length - 1, Math.max(0, idx + dir))];
-    const patch: Partial<Plan> = { status: next };
-    // 状態変更時に status_pct を補正
-    if (next === "計画") patch.status_pct = 0;
-    if (next === "完了") patch.status_pct = 100;
-    if (next === "実施中" && (!r.status_pct || r.status_pct === 0 || r.status_pct === 100)) patch.status_pct = 50;
-    onUpdate(r.id, patch);
+    const pct = next === "計画" ? 0 : next === "完了" ? 100 : Math.max(1, r.status_pct ?? 50);
+    onUpdate(r.id, { status_pct: pct });
   };
 
   return (
@@ -230,7 +281,7 @@ function KanbanView({ rows, onUpdate }: { rows: Plan[]; onUpdate: (id: string, p
               <div style={{ fontSize: 12, color: "#555" }}>{r.task_type}</div>
               <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, alignItems: "center" }}>
                 <span style={{ fontSize: 12 }}>{r.assignee || "—"}</span>
-                <span style={{ fontSize: 12 }}>{fmt(r.period_planned_start)} → {fmt(r.period_planned_end)}</span>
+                <span style={{ fontSize: 12 }}>{fmt(r.period_from)} → {fmt(r.period_to)}</span>
               </div>
               <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
                 {col !== "計画" && <button onClick={() => move(r, -1)}>◀</button>}
@@ -253,17 +304,17 @@ function KanbanView({ rows, onUpdate }: { rows: Plan[]; onUpdate: (id: string, p
   );
 }
 
-// ===== Mini Gantt =====
+/* ========================= Mini Gantt ========================= */
 function GanttMini({ rows }: { rows: Plan[] }) {
   if (rows.length === 0) return <div style={{ color: "#888" }}>データがありません</div>;
   const d = (s?: string) => (s ? day(s) : new Date());
   const minStart = rows.reduce<Date>(
-    (a, r) => (r.period_planned_start ? (d(r.period_planned_start) < a ? d(r.period_planned_start) : a) : a),
-    d(rows[0].period_planned_start)
+    (a, r) => (r.period_from ? (d(r.period_from) < a ? d(r.period_from) : a) : a),
+    d(rows[0].period_from)
   );
   const maxEnd = rows.reduce<Date>(
-    (a, r) => (r.period_planned_end ? (d(r.period_planned_end) > a ? d(r.period_planned_end) : a) : a),
-    d(rows[0].period_planned_end || toYMD(new Date()))
+    (a, r) => (r.period_to ? (d(r.period_to) > a ? d(r.period_to) : a) : a),
+    d(rows[0].period_to || toYMD(new Date()))
   );
   // 期間を週グリッドに丸め
   const startWeek = new Date(minStart); startWeek.setDate(startWeek.getDate() - startWeek.getDay());
@@ -290,9 +341,9 @@ function GanttMini({ rows }: { rows: Plan[] }) {
         <div key={r.id} style={{ display: "grid", gridTemplateColumns: `240px repeat(${weeks.length}, 1fr)`, alignItems: "center", borderTop: "1px solid #f1f1f1" }}>
           <div style={{ padding: 8 }}>
             <div style={{ fontWeight: 600 }}>{r.name}</div>
-            <div style={{ fontSize: 12, color: "#666" }}>{r.assignee || "—"} / {fmt(r.period_planned_start)}→{fmt(r.period_planned_end)}</div>
+            <div style={{ fontSize: 12, color: "#666" }}>{r.assignee || "—"} / {fmt(r.period_from)}→{fmt(r.period_to)}</div>
           </div>
-          <div style={{ gridColumn: `${colOf(r.period_planned_start || toYMD(new Date())) + 1} / span ${spanOf(r.period_planned_start || toYMD(new Date()), r.period_planned_end || r.period_planned_start || toYMD(new Date()))}`, height: 10, background: "#cdeae0", borderRadius: 6, marginRight: 6 }} />
+          <div style={{ gridColumn: `${colOf(r.period_from || toYMD(new Date())) + 1} / span ${spanOf(r.period_from || toYMD(new Date()), r.period_to || r.period_from || toYMD(new Date()))}`, height: 10, background: "#cdeae0", borderRadius: 6, marginRight: 6 }} />
         </div>
       ))}
     </div>
