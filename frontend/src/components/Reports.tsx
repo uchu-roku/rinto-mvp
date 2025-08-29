@@ -4,6 +4,7 @@ import { auth, db, storage } from "../lib/firebase";
 import { authFetch } from "../lib/authFetch";
 import {
   addDoc, collection, onSnapshot, serverTimestamp,
+  query, where, orderBy, limit,
 } from "firebase/firestore";
 import {
   ref as sref, uploadBytesResumable, getDownloadURL,
@@ -27,7 +28,7 @@ type ReportDoc = {
   ended_at?: any;
   duration_ms?: number | null;
   author?: string | null;
-  report_id?: string; // ← Functions (/reports) で作成したIDを保持
+  report_id?: string; // Functions (/reports) で作成したID
 };
 
 /* ------------------------- ユーティリティ ------------------------- */
@@ -86,6 +87,9 @@ export default function Reports() {
   const watchIdRef = useRef<number | null>(null);
   const [startedAt, setStartedAt] = useState<number | null>(null);
 
+  // org_id（クライアント購読用／保存時にも使用）
+  const [orgId, setOrgId] = useState<string | null>(null);
+
   const startGPS = () => {
     if (watchIdRef.current != null) return;
     if (!navigator.geolocation) return toast.error("この端末では位置情報が使えません。");
@@ -131,19 +135,35 @@ export default function Reports() {
     }
   }, []);
 
-  // 直線合計の距離（km）
-  const distanceKm = useMemo(() => distanceKmOf(points), [points]);
-
-  // 一覧（既存 UI 用の読み取りは Firestore のまま）
-  const [items, setItems] = useState<ReportDoc[]>([]);
+  // ログイン/トークン変化時に org_id を取得
   useEffect(() => {
-    const unsub = onSnapshot(collection(db, "work_reports"), (snap) => {
-      const rows = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
-      rows.sort((a, b) => (b.created_at?.toMillis?.() || 0) - (a.created_at?.toMillis?.() || 0));
-      setItems(rows);
+    const unsub = auth.onIdTokenChanged(async (u) => {
+      if (!u) { setOrgId(null); return; }
+      const tr = await u.getIdTokenResult();
+      setOrgId(((tr?.claims as any)?.org_id as string) || null);
     });
     return () => unsub();
   }, []);
+
+  // 直線合計の距離（km）
+  const distanceKm = useMemo(() => distanceKmOf(points), [points]);
+
+  // 一覧（同一 org のみ / created_at desc / 50件）
+  const [items, setItems] = useState<ReportDoc[]>([]);
+  useEffect(() => {
+    if (!orgId) { setItems([]); return; }
+    const q = query(
+      collection(db, "work_reports"),
+      where("org_id", "==", orgId),
+      orderBy("created_at", "desc"),
+      limit(50)
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      const rows = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+      setItems(rows);
+    });
+    return () => unsub();
+  }, [orgId]);
 
   // 送信
   const [busy, setBusy] = useState(false);
@@ -163,8 +183,8 @@ export default function Reports() {
 
       // 0) org_id を取得（カスタムクレーム）
       const token = await user.getIdTokenResult();
-      const orgId = (token.claims as any)?.org_id;
-      if (!orgId) {
+      const orgIdToken = (token.claims as any)?.org_id as string | undefined;
+      if (!orgIdToken) {
         toast.error("org_id が取得できません。管理者に確認してください。");
         return;
       }
@@ -202,7 +222,7 @@ export default function Reports() {
       const { id: report_id } = await authFetch<{ id: string }>("/reports", {
         method: "POST",
         body: JSON.stringify({
-          org_id: orgId,
+          org_id: orgIdToken,
           work_date: workDate,
           task_code: "現地確認",
           output_value: distance,
@@ -235,11 +255,12 @@ export default function Reports() {
         photos,
         points,
         author: user.uid,
+        org_id: orgIdToken,                 // ★必須：ルール整合
         started_at: startedAt ? new Date(startedAt) : null,
         ended_at: new Date(),
         duration_ms: startedAt ? Date.now() - startedAt : null,
         created_at: serverTimestamp(),
-        report_id, // ← Functions 側のIDを保持しておく
+        report_id, // Functions 側のID
       });
 
       // 5) クリア
@@ -300,7 +321,7 @@ export default function Reports() {
         <div style={{ marginTop: 12 }}>
           <button
             onClick={onSubmit}
-            disabled={busy}
+            disabled={busy || !orgId}
             style={{ width: "100%", padding: "10px 0", borderRadius: 8 }}
           >
             {busy ? "送信中..." : "送信"}
