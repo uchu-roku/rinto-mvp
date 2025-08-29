@@ -34,6 +34,12 @@ const SPECIES_COLORS: Record<string, string> = {
   その他: "#888",
 };
 
+// 初期表示範囲（参照を固定して再フィットを防止）
+const INITIAL_BOUNDS: LatLngBoundsExpression = [
+  [41.7, 140.6],
+  [41.9, 140.9],
+] as const;
+
 // ----------------------------- 型 -----------------------------
 type Tree = {
   id: string;
@@ -103,28 +109,31 @@ function ScaleControl() {
   return null;
 }
 
-// ---------------------- 最終表示位置を保存/復元（URLハッシュ廃止） ----------------------
+// ---------------------- 表示位置の保存/初回復元（URLハッシュ依存を廃止） ----------------------
 const VIEW_KEY = "rinto:last_view";
 function ViewMemory({ initial }: { initial: LatLngBoundsExpression }) {
   const map = useMap();
+  const restoredRef = useRef(false);
+
   useEffect(() => {
-    // 復元（初回のみ）
-    const raw = localStorage.getItem(VIEW_KEY);
-    if (raw) {
-      try {
-        const { lat, lng, z } = JSON.parse(raw);
-        if (Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(z)) {
-          map.setView([lat, lng], z);
-        } else {
+    if (!restoredRef.current) {
+      const raw = localStorage.getItem(VIEW_KEY);
+      if (raw) {
+        try {
+          const { lat, lng, z } = JSON.parse(raw);
+          if (Number.isFinite(lat) && Number.isFinite(lng) && Number.isFinite(z)) {
+            map.setView([lat, lng], z);
+          } else {
+            map.fitBounds(initial);
+          }
+        } catch {
           map.fitBounds(initial);
         }
-      } catch {
+      } else {
         map.fitBounds(initial);
       }
-    } else {
-      map.fitBounds(initial);
+      restoredRef.current = true;
     }
-    // 移動後に保存
     const save = () => {
       const c = map.getCenter();
       const z = map.getZoom();
@@ -133,39 +142,8 @@ function ViewMemory({ initial }: { initial: LatLngBoundsExpression }) {
     map.on("moveend", save);
     return () => map.off("moveend", save);
   }, [map, initial]);
-  return null;
-}
 
-// ---------------------- 追加UI：ショートカットヘルプ ----------------------
-function ShortcutsHelp({ open, onClose }: { open: boolean; onClose: () => void }) {
-  if (!open) return null;
-  return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "absolute",
-        right: 12,
-        top: 70,
-        zIndex: 1100,
-        background: "#fff",
-        border: "1px solid #e5e7eb",
-        borderRadius: 10,
-        boxShadow: "0 6px 24px rgba(0,0,0,.12)",
-        padding: "10px 12px",
-        width: 260,
-        cursor: "default",
-      }}
-    >
-      <div style={{ fontWeight: 700, marginBottom: 6 }}>ショートカット</div>
-      <ul style={{ margin: 0, padding: "0 0 0 14px", lineHeight: 1.8 }}>
-        <li><b>F</b>: 条件検索を開く</li>
-        <li><b>L</b>: 現在地へ移動</li>
-        <li><b>H</b>: 初期表示に戻る</li>
-        <li><b>E</b>: 表示中の単木をCSV出力</li>
-        <li><b>?</b>: このヘルプを表示/閉じる</li>
-      </ul>
-    </div>
-  );
+  return null;
 }
 
 // ---------------------- TreesLayer（子） ----------------------
@@ -257,31 +235,22 @@ function TreesLayer({
   const reload = async () => {
     setSelected(null);
     setLoading(true);
-
     try {
-      // BBOX
       const b = map.getBounds();
       const [minLng, minLat, maxLng, maxLat] = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
-
-      // 元データ
       const all = await ensureTrees();
       const inBox = all.filter((t) => t.lng >= minLng && t.lng <= maxLng && t.lat >= minLat && t.lat <= maxLat);
-
-      // 条件でさらに絞る
       const filtered = applyFilters(inBox, filters);
 
-      // サンプリング（描画上限）
       const MAX_DRAW = 3000;
       const step = filtered.length > MAX_DRAW ? Math.ceil(filtered.length / MAX_DRAW) : 1;
       const draw = filtered.filter((_, i) => i % step === 0);
 
-      // 既存レイヤを除去
       if (layerRef.current) {
         map.removeLayer(layerRef.current);
         layerRef.current = null;
       }
 
-      // GeoJSON 構築
       const fc = {
         type: "FeatureCollection" as const,
         features: draw.map((t) => ({
@@ -299,7 +268,6 @@ function TreesLayer({
         })),
       };
 
-      // 反映（Canvasレンダラ使用）＋ 樹種色分け
       const lyr = L.geoJSON(fc, {
         renderer: canvasRendererRef.current,
         pointToLayer: (f: any, latlng) => {
@@ -389,7 +357,7 @@ function TreesLayer({
       const features = (layerRef.current?.toGeoJSON() as any)?.features ?? [];
 
       const inside = (lat: number, lng: number) => {
-        if (shape.getBounds) return shape.getBounds().contains(L.latLng(lat, lng)); // 矩形
+        if (shape.getBounds) return shape.getBounds().contains(L.latLng(lat, lng));
         if (shape.getLatLngs) {
           const latlngs = (shape.getLatLngs()?.[0] ?? []) as L.LatLng[];
           const poly: [number, number][] = latlngs.map((ll) => [ll.lat, ll.lng]);
@@ -497,7 +465,7 @@ function TreesLayer({
 
   return (
     <>
-      {/* 左上：表示本数＋集計＋CSV＋現在地/ホーム（1枚に集約） */}
+      {/* 左上：表示本数＋集計＋CSV＋現在地/ホーム（1枚に集約し重なり解消） */}
       <div
         style={{
           position: "absolute",
@@ -532,9 +500,9 @@ function TreesLayer({
         >
           現在範囲で集計
         </button>
-        <button onClick={exportCsv} title="表示中の単木をCSV出力 (E)">CSV出力</button>
-        <button onClick={() => map.locate({ enableHighAccuracy: true })} title="現在地へ移動 (L)">📍</button>
-        <button onClick={() => map.fitBounds(initialBounds)} title="初期表示に戻る (H)">🏠</button>
+        <button title="表示中の単木をCSV出力 (E)" onClick={exportCsv}>CSV出力</button>
+        <button title="現在地へ移動 (L)" onClick={() => map.locate({ enableHighAccuracy: true })}>📍</button>
+        <button title="初期表示に戻る (H)" onClick={() => map.fitBounds(initialBounds)}>🏠</button>
       </div>
 
       {/* 左下：描画範囲の集計結果 */}
@@ -574,11 +542,6 @@ function TreesLayer({
 
 // ---------------------- MapView（親） ----------------------
 export default function MapView() {
-  const initial: LatLngBoundsExpression = [
-    [41.7, 140.6],
-    [41.9, 140.9],
-  ];
-
   // レイヤ切替・透過
   const [opacity, setOpacity] = useState(0.7);
   const [base, setBase] = useState([
@@ -586,9 +549,6 @@ export default function MapView() {
     { id: "photo", label: "航空写真", active: false },
   ]);
   const [overlays, setOverlays] = useState([{ id: "slope", label: "傾斜", visible: false }]);
-  const changeBase = (id: string) => setBase((bs) => bs.map((b) => ({ ...b, active: b.id === id })));
-  const toggleOverlay = (id: string, next: boolean) =>
-    setOverlays((os) => os.map((o) => (o.id === id ? { ...o, visible: next } : o)));
   const activeBase = base.find((b) => b.active)?.id ?? "std";
 
   // 検索ドロワー
@@ -602,7 +562,7 @@ export default function MapView() {
     new Set(features.map((f: any) => f.properties?.species).filter(Boolean))
   ) as string[];
 
-  // F / ? ショートカット（親）
+  // F / ? ショートカット
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -615,11 +575,9 @@ export default function MapView() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // ---- UI重なり対策：Drawツールバーを少し下へずらす ----
+  // ---- UI重なり対策：Drawツールバーをヘッダから下げる ----
   const drawToolbarShim = `
-    .leaflet-top.leaflet-left .leaflet-draw-toolbar {
-      margin-top: 64px;  /* 左上の操作ボックスと重ならないようオフセット */
-    }
+    .leaflet-top.leaflet-left .leaflet-draw-toolbar { margin-top: 64px; }
     @media (max-width: 768px) {
       .leaflet-top.leaflet-left .leaflet-draw-toolbar { margin-top: 96px; }
     }
@@ -631,10 +589,7 @@ export default function MapView() {
 
       {/* MapContainer は固定化。bounds/center/zoom を渡さず、ViewMemory が復元を担当 */}
       <MapContainer style={{ height: "100%" }} preferCanvas>
-        {/* 表示位置の保存/復元（URLハッシュ依存を廃止） */}
-        <ViewMemory initial={initial} />
-
-        {/* スケールバー */}
+        <ViewMemory initial={INITIAL_BOUNDS} />
         <ScaleControl />
 
         {/* ベース/オーバーレイ */}
@@ -649,7 +604,11 @@ export default function MapView() {
         )}
 
         {/* 単木レイヤ＋ステータスバー */}
-        <TreesLayer filters={filters} onFeaturesChange={setFeatures} initialBounds={initial} />
+        <TreesLayer
+          filters={filters}
+          onFeaturesChange={setFeatures}
+          initialBounds={INITIAL_BOUNDS}
+        />
         <StatusBar />
       </MapContainer>
 
@@ -682,12 +641,12 @@ export default function MapView() {
         ))}
       </div>
 
-      {/* 右上：レイヤ切替（ヘッダと重ならないよう topOffset を調整） */}
+      {/* 右上：レイヤ切替（ヘッダと重ならないよう topOffset を使用） */}
       <LayerSwitcher
         bases={base}
         overlays={overlays}
-        onChangeBase={changeBase}
-        onToggleOverlay={toggleOverlay}
+        onChangeBase={(id) => setBase((bs) => bs.map((b) => ({ ...b, active: b.id === id })))}
+        onToggleOverlay={(id, next) => setOverlays((os) => os.map((o) => (o.id === id ? { ...o, visible: next } : o)))}
         position="top-right"
         topOffset={60}
         footer={
@@ -712,7 +671,33 @@ export default function MapView() {
       />
 
       {/* ショートカットヘルプ */}
-      <ShortcutsHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
+      {helpOpen && (
+        <div
+          onClick={() => setHelpOpen(false)}
+          style={{
+            position: "absolute",
+            right: 12,
+            top: 70,
+            zIndex: 1100,
+            background: "#fff",
+            border: "1px solid #e5e7eb",
+            borderRadius: 10,
+            boxShadow: "0 6px 24px rgba(0,0,0,.12)",
+            padding: "10px 12px",
+            width: 260,
+            cursor: "default",
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>ショートカット</div>
+          <ul style={{ margin: 0, padding: "0 0 0 14px", lineHeight: 1.8 }}>
+            <li><b>F</b>: 条件検索を開く</li>
+            <li><b>L</b>: 現在地へ移動</li>
+            <li><b>H</b>: 初期表示に戻る</li>
+            <li><b>E</b>: 表示中の単木をCSV出力</li>
+            <li><b>?</b>: このヘルプを表示/閉じる</li>
+          </ul>
+        </div>
+      )}
 
       {/* 検索ドロワー */}
       <SearchDrawer
