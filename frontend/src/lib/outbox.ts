@@ -6,14 +6,14 @@ import { db } from "./firebase";
 
 const store = createStore("rinto-outbox", "reports");
 const KEY_PREFIX = "r:";
+const API_URL = "/api/reports";
+const API_STATE_KEY = "rinto:api_state"; // "up" | "down"
+
+type ApiState = "up" | "down" | null;
 
 export type SubmitResult = "sent" | "queued";
 
-/**
- * レポート送信のエントリポイント。
- * - オンライン時は即送信（API → 失敗時は Firestore 直書きにフォールバック）
- * - オフライン時/失敗時は Outbox にキューして後で自動送信
- */
+/** エントリポイント：オンラインなら即送信、失敗/オフラインならキュー */
 export async function submitReport(data: any): Promise<SubmitResult> {
   if (navigator.onLine) {
     try {
@@ -35,14 +35,13 @@ export function initOutboxAutoFlush() {
   window.addEventListener("online", () => flushOutbox());
 }
 
-// ================= 内部実装 =================
+// ============ 内部実装 ============
 
 async function enqueue(data: any) {
   const id = `${KEY_PREFIX}${Date.now()}:${crypto.randomUUID()}`;
   await set(id, data, store);
 }
 
-/** Outbox を送信。成功件数を返す */
 export async function flushOutbox(): Promise<number> {
   let sent = 0;
   for (const k of (await keys(store)) as string[]) {
@@ -53,14 +52,13 @@ export async function flushOutbox(): Promise<number> {
         await del(k, store);
         sent++;
       } catch {
-        // 次回に再挑戦
+        // 次回再挑戦
       }
     }
   }
   return sent;
 }
 
-/** 送信を指数バックオフで何度かリトライ */
 async function retryableSend(data: any, tries = 5) {
   let wait = 500;
   for (let i = 0; i < tries; i++) {
@@ -70,43 +68,72 @@ async function retryableSend(data: any, tries = 5) {
     } catch (e) {
       if (i === tries - 1) throw e;
       await new Promise((r) => setTimeout(r, wait));
-      wait = Math.min(wait * 2, 8_000);
+      wait = Math.min(wait * 2, 8000);
     }
   }
 }
 
-/** 一度だけ送信（API → ダメなら Firestore にフォールバック） */
+let apiStateMemo: ApiState = null;
+
+function getCachedApiState(): ApiState {
+  if (apiStateMemo) return apiStateMemo;
+  const v = localStorage.getItem(API_STATE_KEY);
+  if (v === "up" || v === "down") apiStateMemo = v;
+  return apiStateMemo;
+}
+function setCachedApiState(s: Exclude<ApiState, null>) {
+  apiStateMemo = s;
+  localStorage.setItem(API_STATE_KEY, s);
+}
+
+/** API が使えるか一度だけ確認（結果をキャッシュ） */
+async function isApiAvailable(): Promise<boolean> {
+  const cached = getCachedApiState();
+  if (cached) return cached === "up";
+  try {
+    // HEAD で軽く叩く。404/ネットエラー等なら down とみなす
+    const res = await fetch(API_URL, { method: "HEAD" });
+    const ok = res.ok;
+    setCachedApiState(ok ? "up" : "down");
+    return ok;
+  } catch {
+    setCachedApiState("down");
+    return false;
+  }
+}
+
 async function sendOnce(data: any) {
   const user = getAuth().currentUser;
   if (!user) throw new Error("UNAUTHENTICATED");
 
-  // 1) まずはバックエンド API（存在する環境向け）
+  // API が無いと分かっている環境では最初から Firestore 直書き
+  if (!(await isApiAvailable())) {
+    await sendViaFirestore(data, user);
+    return;
+  }
+
   try {
     await sendViaApi(data, await user.getIdToken());
+    // 問題なく送れたので up を覚えておく
+    setCachedApiState("up");
     return;
   } catch (e: any) {
-    // API が無い Hosting 単体環境などでは 404 になる想定
+    // API 不在/無効っぽいコードは静かにフォールバックし、以後は叩かない
     const status = e?.status ?? parseStatusFromMessage(e?.message);
     const apiUnavailable =
       status === 404 || status === 405 || status === 501 || status === 0 || status == null;
-    if (!apiUnavailable) {
-      // 4xx で API が生きている場合はそのままエラー
-      // （二重登録を避けるためフォールバックしない）
-      throw e;
+    if (apiUnavailable) {
+      setCachedApiState("down");
+      await sendViaFirestore(data, user);
+      return;
     }
+    // それ以外（本当の 4xx エラーなど）は表に伝える
+    throw e;
   }
-
-  // 2) Firestore 直書き（Hosting 単体運用のフォールバック）
-  await sendViaFirestore(data, {
-    uid: user.uid,
-    name: user.displayName ?? null,
-    email: user.email ?? null,
-  });
 }
 
-/** バックエンド API へ送信 */
 async function sendViaApi(data: any, idToken: string) {
-  const res = await fetch("/api/reports", {
+  const res = await fetch(API_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -116,28 +143,29 @@ async function sendViaApi(data: any, idToken: string) {
   });
   if (!res.ok) {
     const err: any = new Error(`HTTP ${res.status}`);
-    (err.status = res.status), (err.statusText = res.statusText);
+    err.status = res.status;
+    err.statusText = res.statusText;
     throw err;
   }
 }
 
-/** Firestore に直接保存 */
-async function sendViaFirestore(
-  data: any,
-  author: { uid: string; name: string | null; email: string | null }
-) {
-  // 期待するフィールド: text, photoUrl(null可), track(GeoJSON)
+async function sendViaFirestore(data: any, user: { uid: string; displayName: string | null; email: string | null }) {
   await addDoc(collection(db, "work_reports"), {
-    ...data,
-    author_uid: author.uid,
-    author_name: author.name,
-    author_email: author.email,
+    ...data,                              // text, photoUrl(null可), track(FC) を想定
+    author_uid: user.uid,
+    author_name: user.displayName ?? null,
+    author_email: user.email ?? null,
     created_at: serverTimestamp(),
   });
 }
 
-/** "HTTP 404" のようなメッセージから status を抽出 */
 function parseStatusFromMessage(msg?: string): number | null {
   const m = msg?.match(/HTTP\s+(\d{3})/i);
   return m ? Number(m[1]) : null;
+}
+
+/** 将来 Functions をデプロイしたらこの関数を一度呼べば API を再検出できます */
+export function resetApiAvailabilityCache() {
+  localStorage.removeItem(API_STATE_KEY);
+  apiStateMemo = null;
 }
