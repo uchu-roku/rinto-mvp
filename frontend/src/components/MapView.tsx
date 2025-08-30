@@ -13,6 +13,7 @@ import TreeDetail from "./TreeDetail";
 import LayerSwitcher from "./map/LayerSwitcher";
 import OpacitySlider from "./map/OpacitySlider";
 import TreePopup from "./map/TreePopup";
+import LayerManager from "./map/LayerManager";
 import SearchDrawer, { type Filters } from "./search/SearchDrawer";
 
 /* ----------------------------- 定数 ----------------------------- */
@@ -241,77 +242,79 @@ function TreesLayer({
 
       const MAX_DRAW = 3000;
       const step = filtered.length > MAX_DRAW ? Math.ceil(filtered.length / MAX_DRAW) : 1;
-      const draw = filtered.filter((_, i) => i % step === 0);
+      theDraw: {
+        const draw = filtered.filter((_, i) => i % step === 0);
 
-      if (layerRef.current) {
-        map.removeLayer(layerRef.current);
-        layerRef.current = null;
-      }
+        if (layerRef.current) {
+          map.removeLayer(layerRef.current);
+          layerRef.current = null;
+        }
 
-      const fc = {
-        type: "FeatureCollection" as const,
-        features: draw.map((t) => ({
-          type: "Feature" as const,
-          geometry: { type: "Point" as const, coordinates: [t.lng, t.lat] },
-          properties: {
-            tree_id: t.id,
-            species: t.species,
-            dbh_cm: t.dbh,
-            height_m: t.height,
-            volume_m3: t.volume,
-            lon: t.lng,
-            lat: t.lat,
-          },
-        })),
-      };
+        const fc = {
+          type: "FeatureCollection" as const,
+          features: draw.map((t) => ({
+            type: "Feature" as const,
+            geometry: { type: "Point" as const, coordinates: [t.lng, t.lat] },
+            properties: {
+              tree_id: t.id,
+              species: t.species,
+              dbh_cm: t.dbh,
+              height_m: t.height,
+              volume_m3: t.volume,
+              lon: t.lng,
+              lat: t.lat,
+            },
+          })),
+        };
 
-      const lyr = L.geoJSON(fc, {
-        renderer: canvasRendererRef.current,
-        pointToLayer: (f: any, latlng) => {
-          const p = f.properties ?? {};
-          const isSel = selectedId && String(p.tree_id ?? "") === selectedId;
-          const col = SPECIES_COLORS[p.species || "その他"] || "#0a7";
-          return L.circleMarker(latlng, {
-            radius: isSel ? 7 : 4,
-            color: isSel ? "#e91e63" : col,
-            weight: isSel ? 2 : 1,
-          });
-        },
-        onEachFeature: (f, layer) => {
-          const p: any = f.properties ?? {};
-          const div = L.DomUtil.create("div");
-          createRoot(div).render(
-            <TreePopup
-              data={{
-                tree_id: p.tree_id,
-                species: p.species,
-                height_m: p.height_m,
-                dbh_cm: p.dbh_cm,
-                volume_m3: p.volume_m3,
-                lon: p.lon,
-                lat: p.lat,
-              }}
-            />
-          );
-          layer.bindPopup(div);
-          layer.on("click", () => {
-            const [lng, lat] = (f.geometry as any).coordinates;
-            setSelected({
-              id: String(p.tree_id ?? ""),
-              lat,
-              lng,
-              species: p.species,
-              dbh: p.dbh_cm,
-              height: p.height_m,
-              volume: p.volume_m3,
+        const lyr = L.geoJSON(fc, {
+          renderer: canvasRendererRef.current,
+          pointToLayer: (f: any, latlng) => {
+            const p = f.properties ?? {};
+            const isSel = selectedId && String(p.tree_id ?? "") === selectedId;
+            const col = SPECIES_COLORS[p.species || "その他"] || "#0a7";
+            return L.circleMarker(latlng, {
+              radius: isSel ? 7 : 4,
+              color: isSel ? "#e91e63" : col,
+              weight: isSel ? 2 : 1,
             });
-          });
-        },
-      }).addTo(map);
+          },
+          onEachFeature: (f, layer) => {
+            const p: any = f.properties ?? {};
+            const div = L.DomUtil.create("div");
+            createRoot(div).render(
+              <TreePopup
+                data={{
+                  tree_id: p.tree_id,
+                  species: p.species,
+                  height_m: p.height_m,
+                  dbh_cm: p.dbh_cm,
+                  volume_m3: p.volume_m3,
+                  lon: p.lon,
+                  lat: p.lat,
+                }}
+              />
+            );
+            layer.bindPopup(div);
+            layer.on("click", () => {
+              const [lng, lat] = (f.geometry as any).coordinates;
+              setSelected({
+                id: String(p.tree_id ?? ""),
+                lat,
+                lng,
+                species: p.species,
+                dbh: p.dbh_cm,
+                height: p.height_m,
+                volume: p.volume_m3,
+              });
+            });
+          },
+        }).addTo(map);
 
-      layerRef.current = lyr;
-      setCount(filtered.length);
-      onFeaturesChange(fc.features);
+        layerRef.current = lyr;
+        setCount(filtered.length);
+        onFeaturesChange(fc.features);
+      }
     } finally {
       setLoading(false);
     }
@@ -351,8 +354,10 @@ function TreesLayer({
       const inside = (lat: number, lng: number) => {
         if (shape.getBounds) return shape.getBounds().contains(L.latLng(lat, lng));
         if (shape.getLatLngs) {
-          const latlngs = (shape.getLatLngs()?.[0] ?? []) as L.LatLng[];
-          const poly: [number, number][] = latlngs.map((ll) => [ll.lat, ll.lng]);
+          const ll = shape.getLatLngs?.();
+          const latlngs: L.LatLng[] = Array.isArray(ll) ? (Array.isArray(ll[0]) ? ll[0] : ll) : [];
+          // 射線法
+          const poly: [number, number][] = latlngs.map((p) => [p.lat, p.lng]);
           let x = lng, y = lat, ok = false;
           for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
             const xi = poly[i][1], yi = poly[i][0];
@@ -439,8 +444,8 @@ function TreesLayer({
     const headers = ["id", "lat", "lng", "species", "dbh_cm", "height_m", "volume_m3"];
     const csv =
       headers.join(",") +
-      "\n" +
-      rows.map((r) => headers.map((h) => JSON.stringify((r as any)[h] ?? "")).join(",")).join("\n");
+      "\r\n" +
+      rows.map((r) => headers.map((h) => JSON.stringify((r as any)[h] ?? "")).join(",")).join("\r\n");
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -484,12 +489,12 @@ function TreesLayer({
             const props = features.map((f: any) => f.properties || {});
             const num = (xs: any[]) => xs.map(Number).filter((n) => Number.isFinite(n));
             const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
-            const count = props.length;
+            const countV = props.length;
             const avg_height = avg(num(props.map((p: any) => p.height_m)));
             const avg_dbh = avg(num(props.map((p: any) => p.dbh_cm)));
             const sum_volume = num(props.map((p: any) => p.volume_m3)).reduce((a: number, b: number) => a + b, 0);
             alert(
-              `本数:${count}\n平均樹高:${avg_height ? avg_height.toFixed(2) : "—"}m\n平均DBH:${avg_dbh ? avg_dbh.toFixed(1) : "—"}cm\n総材積:${sum_volume ? sum_volume.toFixed(2) : "—"}m³`
+              `本数:${countV}\n平均樹高:${avg_height ? avg_height.toFixed(2) : "—"}m\n平均DBH:${avg_dbh ? avg_dbh.toFixed(1) : "—"}cm\n総材積:${sum_volume ? sum_volume.toFixed(2) : "—"}m³`
             );
           }}
           title="現在の表示範囲を集計"
@@ -498,7 +503,13 @@ function TreesLayer({
         </button>
         <button onClick={exportCsv} title="表示中の単木をCSV出力 (E)" aria-label="CSV出力">CSV出力</button>
         <button onClick={() => map.locate({ enableHighAccuracy: true })} title="現在地へ移動 (L)" aria-label="現在地へ">📍</button>
-        <button onClick={() => map.fitBounds(initialBounds)} title="初期表示に戻る (H)" aria-label="初期表示に戻る">🏠</button>
+        <button
+          onClick={() => { localStorage.removeItem(VIEW_KEY); map.fitBounds(initialBounds); }}
+          title="初期表示に戻る (H)"
+          aria-label="初期表示に戻る"
+        >
+          🏠
+        </button>
       </div>
 
       {/* 左下：描画範囲の集計 */}
@@ -570,6 +581,8 @@ export default function MapView() {
     { id: "canopy_surface", label: "樹冠表面", visible: false },
   ]);
 
+  const [showLayerManager, setShowLayerManager] = useState(false);
+
   const activeBase = base.find((b) => b.active)?.id ?? "std";
 
   // ドロワー/検索
@@ -598,7 +611,7 @@ export default function MapView() {
       if (k === "f") setDrawerOpen(true);
       if (k === "?") setHelpOpen((v) => !v);
       if (k === "e") exportCsvRef.current?.();
-      if (k === "h") localStorage.removeItem(VIEW_KEY); // H: 初期表示に戻る前に記憶を消すと復元ループ回避が明確
+      if (k === "h") localStorage.removeItem(VIEW_KEY);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -671,7 +684,7 @@ export default function MapView() {
         <StatusBar />
       </MapContainer>
 
-      {/* 右下：凡例 */}
+      {/* 右下：凡例（簡易） */}
       <div
         style={{
           position: "absolute",
@@ -726,9 +739,28 @@ export default function MapView() {
             >
               ？
             </button>
+            <button
+              onClick={() => setShowLayerManager(true)}
+              style={{ padding: "6px 10px", border: "1px solid #e5e7eb", background: "#fff", borderRadius: 8 }}
+              title="レイヤ詳細"
+            >
+              詳細
+            </button>
           </div>
         }
       />
+
+      {/* レイヤ詳細パネル（LayerManager） */}
+      {showLayerManager && (
+        <LayerManager
+          overlays={overlays}
+          onChange={(next: typeof overlays) => setOverlays(next)}
+          opacity={opacity}
+          onOpacity={(v: number) => setOpacity(v)}
+          onClose={() => setShowLayerManager(false)}
+          topOffset={HEADER_OFFSET + 8}
+        />
+      )}
 
       {/* ショートカットヘルプ */}
       {helpOpen && (
