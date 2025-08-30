@@ -22,13 +22,15 @@ const clamp = (n: number, a = 0, b = 100) => Math.min(b, Math.max(a, n));
 const fmt = (s?: string) => (s || "—");
 const day = (s: string) => new Date(s + "T00:00:00");
 const toYMD = (d: Date) => d.toISOString().slice(0, 10);
-const inferStatus = (p: Plan) => ((p.status_pct ?? 0) >= 100 ? "完了" : (p.status_pct ?? 0) > 0 ? "実施中" : "計画");
+const inferStatus = (p: Plan) =>
+  (p.status_pct ?? 0) >= 100 ? "完了" : (p.status_pct ?? 0) > 0 ? "実施中" : "計画";
 
 export default function Plans() {
   const [view, setView] = useState<ViewMode>("table");
   const [items, setItems] = useState<Plan[]>([]);
   const [busy, setBusy] = useState(false);
   const [orgId, setOrgId] = useState<string | undefined>(undefined);
+  const [limit, setLimit] = useState<number>(200);
 
   // 追加フォーム
   const [f, setF] = useState<Partial<Plan> & { task_type?: string; assignee?: string }>({
@@ -40,15 +42,17 @@ export default function Plans() {
     (async () => {
       const tr = await auth.currentUser?.getIdTokenResult();
       setOrgId((tr?.claims as any)?.org_id);
-      await reload();
+      await reload(limit);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function reload() {
-    const { items } = await authFetch<{ items: any[] }>("/plans?limit=200");
-    // APIの戻り → UI用に整形（最低限のキーだけ取る）
-    const rows: Plan[] = items.map((x) => ({
+  // limit 変更時に再取得
+  useEffect(() => { reload(limit); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [limit]);
+
+  async function reload(lim = 200) {
+    const res = await authFetch<{ items: any[] }>(`/api/plans?limit=${encodeURIComponent(lim)}`);
+    const rows: Plan[] = (res.items || []).map((x) => ({
       id: String(x.id),
       name: String(x.name ?? ""),
       task_type: x.task_type ?? "",
@@ -58,7 +62,6 @@ export default function Plans() {
       status_pct: typeof x.status_pct === "number" ? x.status_pct : 0,
       created_at: x.created_at,
     }));
-    // created_at desc
     rows.sort((a, b) => (b.created_at?.seconds || 0) - (a.created_at?.seconds || 0));
     setItems(rows);
   }
@@ -69,7 +72,7 @@ export default function Plans() {
     if (!orgId) return alert("org_id が取得できません。再ログインしてください。");
     setBusy(true);
     try {
-      await authFetch("/plans", {
+      await authFetch("/api/plans", {
         method: "POST",
         body: JSON.stringify({
           org_id: orgId,
@@ -82,7 +85,7 @@ export default function Plans() {
         }),
       });
       setF({ name: "", task_type: "", assignee: "", period_from: "", period_to: "", status_pct: 0 });
-      await reload();
+      await reload(limit);
     } catch (e: any) {
       alert("保存に失敗しました: " + (e?.message || e));
       console.error(e);
@@ -95,8 +98,8 @@ export default function Plans() {
     // 楽観的更新
     setItems((arr) => arr.map((p) => (p.id === id ? { ...p, ...patch } : p)));
 
-    // サーバへ送るキーだけ抽出（サーバ側で許可しているフィールド）
-    const ALLOWED: (keyof Plan)[] = ["status_pct", "assignee", "task_type", "period_from", "period_to"];
+    // サーバへ送るキーだけ抽出（※Functions 側 ALLOWED_KEYS に name も入れてください）
+    const ALLOWED: (keyof Plan)[] = ["name", "status_pct", "assignee", "task_type", "period_from", "period_to"];
     const body: Record<string, any> = {};
     for (const k of ALLOWED) if (k in patch) body[k] = (patch as any)[k];
 
@@ -105,27 +108,44 @@ export default function Plans() {
     if (prev) window.clearTimeout(prev);
     const h = window.setTimeout(async () => {
       try {
-        await authFetch(`/plans/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+        await authFetch(`/api/plans/${id}`, { method: "PATCH", body: JSON.stringify(body) });
       } catch (e) {
         console.error(e);
-        // 失敗時は最新を再取得
-        await reload();
+        await reload(limit); // 失敗時は最新を再取得
       }
       timers.current.delete(id);
     }, 400);
     timers.current.set(id, h);
   }
 
-  // 削除（API未実装のため無効化）
-  const remove = async (_id: string) => {
-    alert("削除は現在未対応です（要件に応じて Functions 側へ DELETE を追加してください）");
+  // アンマウント時にデバウンスタイマー掃除
+  useEffect(() => {
+    return () => {
+      timers.current.forEach((h) => window.clearTimeout(h));
+      timers.current.clear();
+    };
+  }, []);
+
+  // 削除
+  const remove = async (id: string) => {
+    if (!confirm("この計画を削除します。よろしいですか？")) return;
+    try {
+      await authFetch(`/api/plans/${id}`, { method: "DELETE" });
+      await reload(limit);
+    } catch (e: any) {
+      alert("削除に失敗しました: " + (e?.message || e));
+      console.error(e);
+    }
   };
 
   // 絞り込み
   const [qtext, setQtext] = useState("");
   const [qstatus, setQstatus] = useState<"" | "計画" | "実施中" | "完了">("");
   const [qowner, setQowner] = useState("");
-  const owners = useMemo(() => Array.from(new Set(items.map(i => i.assignee).filter(Boolean))).sort(), [items]);
+  const owners = useMemo(
+    () => Array.from(new Set(items.map(i => i.assignee).filter(Boolean))).sort(),
+    [items]
+  );
 
   const filtered = useMemo(() => {
     return items.filter(i => {
@@ -152,7 +172,7 @@ export default function Plans() {
         <button onClick={add} disabled={busy || !orgId}>追加</button>
       </div>
 
-      {/* フィルタ & ビュー切替 */}
+      {/* フィルタ & ビュー切替 & 件数制御 */}
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
         <input placeholder="キーワード検索" value={qtext} onChange={e => setQtext(e.target.value)} style={{ width: 280 }} />
         <select value={qstatus} onChange={e => setQstatus(e.target.value as any)}>
@@ -165,6 +185,14 @@ export default function Plans() {
           <option value="">すべての担当</option>
           {owners.map(o => <option key={o} value={o}>{o}</option>)}
         </select>
+
+        <div style={{ marginLeft: 12 }}>
+          <label style={{ fontSize: 12, marginRight: 6 }}>件数</label>
+          <select value={limit} onChange={e => setLimit(Number(e.target.value))}>
+            {[50, 100, 200, 500].map(v => <option key={v} value={v}>{v}</option>)}
+          </select>
+        </div>
+
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
           <button onClick={() => setView("table")} disabled={view === "table"}>表</button>
           <button onClick={() => setView("kanban")} disabled={view === "kanban"}>カンバン</button>
@@ -248,7 +276,7 @@ function TableView({ rows, onUpdate, onRemove }:
               </div>
               <div style={{ display: "flex", gap: 6 }}>
                 <button onClick={() => startEdit(r)}>編集</button>
-                <button onClick={() => onRemove(r.id)} disabled>削除</button>
+                <button onClick={() => onRemove(r.id)}>削除</button>
               </div>
             </>
           )}
@@ -343,7 +371,13 @@ function GanttMini({ rows }: { rows: Plan[] }) {
             <div style={{ fontWeight: 600 }}>{r.name}</div>
             <div style={{ fontSize: 12, color: "#666" }}>{r.assignee || "—"} / {fmt(r.period_from)}→{fmt(r.period_to)}</div>
           </div>
-          <div style={{ gridColumn: `${colOf(r.period_from || toYMD(new Date())) + 1} / span ${spanOf(r.period_from || toYMD(new Date()), r.period_to || r.period_from || toYMD(new Date()))}`, height: 10, background: "#cdeae0", borderRadius: 6, marginRight: 6 }} />
+          <div style={{
+            gridColumn: `${colOf(r.period_from || toYMD(new Date())) + 1} / span ${spanOf(
+              r.period_from || toYMD(new Date()),
+              r.period_to || r.period_from || toYMD(new Date())
+            )}`,
+            height: 10, background: "#cdeae0", borderRadius: 6, marginRight: 6
+          }} />
         </div>
       ))}
     </div>
