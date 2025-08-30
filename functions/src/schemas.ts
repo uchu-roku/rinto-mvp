@@ -51,18 +51,37 @@ export const GeoJSONMultiPolygon = z.object({
 });
 
 /* ----------------------------- 列挙・表記ゆれ ---------------------------- */
-// 出力単位：よくある同義表記を受け入れて正規化（"m3"→"m³" など）
-const UnitNormalized = z
-  .union([z.literal("ha"), z.literal("m³"), z.literal("m3"), z.literal("本"), z.literal("m")])
-  .transform((u: "ha" | "m³" | "m3" | "本" | "m") => (u === "m3" ? "m³" : (u as "ha" | "m³" | "本" | "m")));
+/** 入力側が許可する単位の列挙（"m3" も許容） */
+const UnitIn = z.union([
+  z.literal("ha"),
+  z.literal("m³"),
+  z.literal("m3"),
+  z.literal("本"),
+  z.literal("m"),
+]);
 
-const Weather = z.union([z.literal("晴"), z.literal("曇"), z.literal("雨"), z.literal("雪"), z.literal("その他")]);
+/** 変換後（出力）の正規化済み単位 */
+const UnitOut = z.union([
+  z.literal("ha"),
+  z.literal("m³"),
+  z.literal("本"),
+  z.literal("m"),
+]);
+
+const Weather = z.union([
+  z.literal("晴"),
+  z.literal("曇"),
+  z.literal("雨"),
+  z.literal("雪"),
+  z.literal("その他"),
+]);
 const Incident = z.union([z.literal("無"), z.literal("軽微"), z.literal("事故")]);
 
 /* ------------------------------- ReportSchema --------------------------- */
 /**
  * 日報。既存実装のゆらぎ（unit / output_unit、数値文字列）をサーバ側で吸収し、
  * 正規化して { unit } に統一して返す。
+ * ※ 型エラー回避のため、入力 unit/output_unit も列挙（UnitIn）で受ける。
  */
 const ReportBase = z
   .object({
@@ -73,9 +92,11 @@ const ReportBase = z
       .refine((s: string) => isValidYMD(s), "存在しない日付です"),
     task_code: SafeStr(1, 64),
     output_value: Num.nonnegative(),
-    // 表記ゆれ対策：どちらか必須 → unit に統一
-    unit: SafeStr(1, 16).optional(),
-    output_unit: SafeStr(1, 16).optional(),
+
+    // どちらか必須（出力では unit に統一）
+    unit: UnitIn.optional(),
+    output_unit: UnitIn.optional(),
+
     note: SafeStr(0, 1000).optional(),
 
     // オプション（MVPでは任意）
@@ -101,9 +122,11 @@ export const ReportSchema = ReportBase
     message: "unit もしくは output_unit を指定してください",
   })
   .transform((d) => {
-    const normalizedUnit = (d.unit ?? d.output_unit)!;
-    const { unit, output_unit, ...rest } = d;
-    const u = UnitNormalized.parse(normalizedUnit);
+    // "m3" を "m³" に正規化し、UnitOut で厳格化
+    const candidate = (d.unit ?? d.output_unit)!;
+    const normalized = candidate === "m3" ? "m³" : candidate;
+    const u = UnitOut.parse(normalized);
+    const { unit: _u, output_unit: _ou, ...rest } = d;
     return { ...rest, unit: u };
   });
 
@@ -147,8 +170,12 @@ const TrackBase = z
   .object({
     report_id: SafeStr(1, 128),
     geom: GeoJSONLineString,
-    start: z.string().refine((s: string) => !Number.isNaN(Date.parse(s)), "ISO日時で指定してください"),
-    end: z.string().refine((s: string) => !Number.isNaN(Date.parse(s)), "ISO日時で指定してください"),
+    start: z
+      .string()
+      .refine((s: string) => !Number.isNaN(Date.parse(s)), "ISO日時で指定してください"),
+    end: z
+      .string()
+      .refine((s: string) => !Number.isNaN(Date.parse(s)), "ISO日時で指定してください"),
     length_m: Num.nonnegative(),
   })
   .strict();
@@ -175,11 +202,17 @@ const TreesSearchBase = z
 
 export const TreesSearchQuerySchema = TreesSearchBase
   .refine(
-    (q) => (q.height_min != null && q.height_max != null ? q.height_min <= q.height_max : true),
+    (q) =>
+      q.height_min != null && q.height_max != null
+        ? q.height_min <= q.height_max
+        : true,
     { path: ["height_min"], message: "height_min は height_max 以下にしてください" }
   )
   .refine(
-    (q) => (q.dbh_min != null && q.dbh_max != null ? q.dbh_min <= q.dbh_max : true),
+    (q) =>
+      q.dbh_min != null && q.dbh_max != null
+        ? q.dbh_min <= q.dbh_max
+        : true,
     { path: ["dbh_min"], message: "dbh_min は dbh_max 以下にしてください" }
   );
 
