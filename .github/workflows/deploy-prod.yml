@@ -4,9 +4,15 @@ on:
   push:
     branches: [ main ]
 
+concurrency:
+  group: deploy-prod-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -15,27 +21,33 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+          cache: npm
+          # フロント/関数どちらもキャッシュ対象に
+          cache-dependency-path: |
+            frontend/package-lock.json
+            functions/package-lock.json
 
-      # ---------- Frontend ----------
-      - name: Create frontend/.env from secrets
-        working-directory: frontend
-        run: |
-          echo VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }}            > .env
-          echo VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}   >> .env
-          echo VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }}     >> .env
-          echo VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }} >> .env
-          echo VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}             >> .env
-          # 使うなら↓も（未使用なら不要）
-          # echo VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }} >> .env
-
-      - name: Ensure npm registry
+      - name: Ensure npm registry (quiet)
         run: |
           npm config set registry https://registry.npmjs.org/
           npm config set audit false
           npm config set fund false
 
+      # ---------- Frontend ----------
+      - name: Create frontend/.env from secrets
+        working-directory: frontend
+        run: |
+          {
+            echo VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }}
+            echo VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+            echo VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+            echo VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+            echo VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}
+            # 使うなら↓も
+            # echo VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          } > .env
+
+      # 一部 rollup 依存対策（必要なくなったら削除OK）
       - name: Pin transitive deps (math-intrinsics)
         working-directory: frontend
         run: npm pkg set "overrides.math-intrinsics=1.0.0"
@@ -47,10 +59,40 @@ jobs:
       - name: Build (frontend)
         working-directory: frontend
         env:
-          ENABLE_PWA: "0"   # ← 追加：CIではPWA無効
+          CI: "true"
+          ENABLE_PWA: "0"   # CI では PWA を無効化（vite-plugin-pwa の buildEnd を回避）
         run: npm run build
 
-      # ---------- Hosting only ----------
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 7
+
+      # ---------- Functions ----------
+      - name: Install deps (functions)
+        working-directory: functions
+        run: npm ci
+
+      - name: Build (functions)
+        working-directory: functions
+        env:
+          CI: "true"
+        run: npm run build
+
+      # （必要なら）Functions の環境変数をここで設定してください
+      # - name: Set Functions runtime env (optional)
+      #   run: |
+      #     npm i -g firebase-tools
+      #     firebase functions:config:set \
+      #       tiles.dem="${{ secrets.TILES_DEM_URL }}" \
+      #       tiles.slope="${{ secrets.TILES_SLOPE_URL }}" \
+      #       --project ${{ secrets.FIREBASE_PROJECT_ID }} \
+      #       --token ${{ secrets.FIREBASE_TOKEN }}
+
+      # ---------- Deploy ----------
       - name: Deploy Hosting (live)
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
@@ -59,3 +101,13 @@ jobs:
           projectId: ${{ secrets.FIREBASE_PROJECT_ID }}
           channelId: live
           entryPoint: .
+        # firebase.json の hosting.public が "frontend/dist" を指している想定
+
+      - name: Deploy Functions (api)
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          npm i -g firebase-tools
+          firebase deploy --only functions:api \
+            --project ${{ secrets.FIREBASE_PROJECT_ID }} \
+            --token "$FIREBASE_TOKEN"
