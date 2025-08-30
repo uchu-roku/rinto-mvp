@@ -19,7 +19,7 @@ import { toast } from "react-hot-toast";
 import { MapContainer, TileLayer, Polyline } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
-// ★ submitToOutbox ではなく submitReport を使う
+// ★ submitToOutbox ではなく submitReport を使う（オフラインキュー）
 import { submitReport } from "../lib/outbox";
 
 /* ----------------------------- 型 ----------------------------- */
@@ -61,18 +61,33 @@ function distanceKmOf(poly: LatLng[]): number {
 function MiniRouteMap({ pts }: { pts: LatLng[] }) {
   if (!pts.length) {
     return (
-      <div style={{ height: 180, border: "1px dashed #ddd", borderRadius: 8, display: "grid", placeItems: "center", color: "#888" }}>
+      <div
+        style={{
+          height: 180,
+          border: "1px dashed #ddd",
+          borderRadius: 8,
+          display: "grid",
+          placeItems: "center",
+          color: "#888",
+        }}
+      >
         GPSルートなし
       </div>
     );
   }
   const latArr = pts.map((p) => p.lat);
   const lngArr = pts.map((p) => p.lng);
-  const bounds: any = [[Math.min(...latArr), Math.min(...lngArr)], [Math.max(...latArr), Math.max(...lngArr)]];
+  const bounds: any = [
+    [Math.min(...latArr), Math.min(...lngArr)],
+    [Math.max(...latArr), Math.max(...lngArr)],
+  ];
   return (
     <div style={{ height: 180, borderRadius: 8, overflow: "hidden", border: "1px solid #eee" }}>
       <MapContainer style={{ height: "100%" }} bounds={bounds} scrollWheelZoom={false}>
-        <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
+        <TileLayer
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          attribution="&copy; OpenStreetMap"
+        />
         <Polyline positions={pts.map((p) => [p.lat, p.lng]) as any} weight={4} />
       </MapContainer>
     </div>
@@ -95,11 +110,49 @@ export default function Reports() {
   // org_id（購読/保存）
   const [orgId, setOrgId] = useState<string | null>(null);
 
+  // Storage ルール整合のためのクライアント側チェック
+  const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB
+  const ALLOWED_IMAGE_RE = /^image\/(jpeg|jpg|png|webp|heic|heif)$/i;
+
+  const sanitizeFileName = (name: string) =>
+    name
+      .replace(/[/\\?%*:|"<>]/g, "_")
+      .replace(/\s+/g, "_")
+      .slice(0, 120);
+
+  const handleFiles = (picked: File[]) => {
+    if (!picked?.length) {
+      setFiles([]);
+      return;
+    }
+    const bads: string[] = [];
+    const oks: File[] = [];
+    for (const f of picked) {
+      if (!ALLOWED_IMAGE_RE.test(f.type)) {
+        bads.push(`${f.name}（不許可の種類: ${f.type || "unknown"}）`);
+        continue;
+      }
+      if (f.size >= MAX_IMAGE_BYTES) {
+        bads.push(`${f.name}（サイズ > 10MB）`);
+        continue;
+      }
+      oks.push(f);
+    }
+    setFiles(oks);
+    if (bads.length) {
+      toast.error(`アップロード不可のファイルがあります:\n• ${bads.join("\n• ")}`);
+    }
+  };
+
   const startGPS = () => {
     if (watchIdRef.current != null) return;
     if (!navigator.geolocation) return toast.error("この端末では位置情報が使えません。");
     const id = navigator.geolocation.watchPosition(
-      (p) => setPoints((prev) => [...prev, { lat: p.coords.latitude, lng: p.coords.longitude, t: Date.now() }]),
+      (p) =>
+        setPoints((prev) => [
+          ...prev,
+          { lat: p.coords.latitude, lng: p.coords.longitude, t: Date.now() },
+        ]),
       (e) => toast.error("GPSエラー: " + e.message),
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 }
     );
@@ -151,14 +204,19 @@ export default function Reports() {
   // 一覧（同一 org のみ）
   const [items, setItems] = useState<ReportDoc[]>([]);
   useEffect(() => {
-    if (!orgId) { setItems([]); return; }
-    const q = query(
+    if (!orgId) {
+      setItems([]);
+      return;
+    }
+    const qy = query(
       collection(db, "work_reports"),
       where("org_id", "==", orgId),
       orderBy("created_at", "desc"),
       limit(50)
     );
-    const unsub = onSnapshot(q, (snap) => setItems(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))));
+    const unsub = onSnapshot(qy, (snap) =>
+      setItems(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })))
+    );
     return () => unsub();
   }, [orgId]);
 
@@ -171,7 +229,7 @@ export default function Reports() {
       return toast.error("本文・写真・GPS のいずれかを入力してください。");
     }
 
-    const startMs = startedAt ?? (points[0]?.t ?? Date.now());
+    const startMs = startedAt ?? points[0]?.t ?? Date.now();
     const endMs = points[points.length - 1]?.t ?? Date.now();
     const workDate = toYMD(new Date(startMs));
     const distance = Number(distanceKm.toFixed(3)); // km
@@ -183,14 +241,16 @@ export default function Reports() {
       }
       try {
         await submitReport({
-          // API /api/reports にそのまま送るボディ（org_id はトークンからサーバ側で解決）
           work_date: workDate,
           task_code: "現地確認",
           output_value: distance,
           unit: "km",
           note: body.trim(),
         });
-        setBody(""); setFiles([]); setPoints([]); setStartedAt(null);
+        setBody("");
+        setFiles([]);
+        setPoints([]);
+        setStartedAt(null);
         localStorage.removeItem("report_draft");
         toast.success("送信キューに登録しました。オンラインで自動送信します。");
       } catch (e: any) {
@@ -213,21 +273,32 @@ export default function Reports() {
         return;
       }
 
-      // 1) 写真アップロード
+      // 1) 写真アップロード（Storage ルール整合：org_id を customMetadata に付与）
       const photos: Photo[] = [];
       let done = 0;
       const total = Math.max(1, files.length);
-      for (const f of files) {
-        const path = `reports/${user.uid}/${Date.now()}_${f.name}`;
-        const task = uploadBytesResumable(sref(storage, path), f, { contentType: f.type });
+
+      for (const f0 of files) {
+        // 念のためクライアント側でも再検証
+        if (!ALLOWED_IMAGE_RE.test(f0.type) || f0.size >= MAX_IMAGE_BYTES) {
+          throw new Error("画像の種類またはサイズが不正です。");
+        }
+        const name = sanitizeFileName(f0.name);
+        const path = `reports/${user.uid}/${Date.now()}_${name}`;
+        const meta = { contentType: f0.type || "image/jpeg", customMetadata: { org_id: orgIdToken } };
+
+        const task = uploadBytesResumable(sref(storage, path), f0, meta);
         await new Promise<void>((resolve, reject) => {
           task.on(
             "state_changed",
-            (s) => setUploadPct(Math.round(((done + s.bytesTransferred / (s.totalBytes || 1)) / total) * 100)),
-            reject,
+            (s) =>
+              setUploadPct(
+                Math.round(((done + s.bytesTransferred / (s.totalBytes || 1)) / total) * 100)
+              ),
+            (err) => reject(err),
             async () => {
               const url = await getDownloadURL(task.snapshot.ref);
-              photos.push({ name: f.name, path, url, size: f.size, type: f.type });
+              photos.push({ name, path, url, size: f0.size, type: meta.contentType });
               done += 1;
               setUploadPct(Math.round((done / total) * 100));
               resolve();
@@ -284,7 +355,11 @@ export default function Reports() {
       });
 
       // 5) クリア
-      setBody(""); setFiles([]); setPoints([]); setStartedAt(null); setUploadPct(0);
+      setBody("");
+      setFiles([]);
+      setPoints([]);
+      setStartedAt(null);
+      setUploadPct(0);
       localStorage.removeItem("report_draft");
       toast.success("送信しました");
     } catch (e: any) {
@@ -308,9 +383,25 @@ export default function Reports() {
           onChange={(e) => setBody(e.target.value)}
           style={{ width: "100%", resize: "vertical", padding: 8 }}
         />
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            flexWrap: "wrap",
+            marginTop: 8,
+          }}
+        >
           <label>
-            <span style={{ padding: "6px 10px", border: "1px solid #ddd", borderRadius: 8, background: "#fff", cursor: "pointer" }}>
+            <span
+              style={{
+                padding: "6px 10px",
+                border: "1px solid #ddd",
+                borderRadius: 8,
+                background: "#fff",
+                cursor: "pointer",
+              }}
+            >
               ファイルの選択
             </span>
             <input
@@ -318,10 +409,12 @@ export default function Reports() {
               multiple
               accept="image/*"
               style={{ display: "none" }}
-              onChange={(e) => setFiles(Array.from(e.target.files || []))}
+              onChange={(e) => handleFiles(Array.from(e.target.files || []))}
             />
           </label>
-          <span style={{ color: "#666" }}>{files.length ? `${files.length} 件選択` : "ファイルが選択されていません"}</span>
+          <span style={{ color: "#666" }}>
+            {files.length ? `${files.length} 件選択` : "ファイルが選択されていません"}
+          </span>
 
           {!watching && <button onClick={startGPS}>GPS開始</button>}
           {watching && <button onClick={stopGPS}>GPS停止</button>}
@@ -337,7 +430,11 @@ export default function Reports() {
         )}
 
         <div style={{ marginTop: 12 }}>
-          <button onClick={onSubmit} disabled={busy || !orgId} style={{ width: "100%", padding: "10px 0", borderRadius: 8 }}>
+          <button
+            onClick={onSubmit}
+            disabled={busy || !orgId}
+            style={{ width: "100%", padding: "10px 0", borderRadius: 8 }}
+          >
             {busy ? "送信中..." : "送信"}
           </button>
         </div>
@@ -351,7 +448,9 @@ export default function Reports() {
             <div style={{ fontSize: 12, color: "#666" }}>
               {r.created_at?.toDate ? r.created_at.toDate().toLocaleString() : "—"}
             </div>
-            <div style={{ whiteSpace: "pre-wrap", margin: "6px 0" }}>{r.body || "（本文なし）"}</div>
+            <div style={{ whiteSpace: "pre-wrap", margin: "6px 0" }}>
+              {r.body || "（本文なし）"}
+            </div>
 
             {/* 写真プレビュー */}
             {r.photos?.length ? (
@@ -361,7 +460,13 @@ export default function Reports() {
                     key={i}
                     src={p.url}
                     alt={p.name}
-                    style={{ width: 120, height: 80, objectFit: "cover", borderRadius: 6, border: "1px solid #eee" }}
+                    style={{
+                      width: 120,
+                      height: 80,
+                      objectFit: "cover",
+                      borderRadius: 6,
+                      border: "1px solid #eee",
+                    }}
                   />
                 ))}
               </div>
