@@ -1,60 +1,178 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-const latlngs = (layer as any).getLatLngs();
-poly = (Array.isArray(latlngs[0]) ? latlngs[0] : latlngs) as L.LatLng[];
-} else if ((layer as any).getBounds) {
-const b = (layer as any).getBounds() as L.LatLngBounds;
-poly = [b.getSouthWest(), L.latLng(b.getSouthWest().lat, b.getNorthEast().lng), b.getNorthEast(), L.latLng(b.getNorthEast().lat, b.getSouthWest().lng)];
-}
-const picked = allPoints.filter(p => pointInPolygon({ lat: p.lat, lng: p.lng }, poly));
-const count = picked.length;
-const heightAvg = avg(picked.map(p => p.height));
-const dbhAvg = avg(picked.map(p => p.dbh));
-const volumeTotal = sum(picked.map(p => p.volume));
-setStats({ count, heightAvg, dbhAvg, volumeTotal });
+// rinto-mvp/frontend/src/components/map/RangeStatsDrawer.tsx
+import React from "react";
+
+export type RangeStatItem = {
+  /** 選択図形（GeoJSON; Polygon/Rectangleなど） */
+  geom: any | null;
+  /** 集計結果（Map側で算出済） */
+  stats: {
+    count: number;
+    avgDbh: number | null;    // cm
+    avgHeight: number | null; // m
+    // 必要になったら sumVolume などを追加してOK
+  };
 };
-map.on(L.Draw.Event.CREATED as any, onCreated);
-return () => { map.off(L.Draw.Event.CREATED as any, onCreated); };
-}, [map, allPoints]);
 
+type Props = {
+  /** ドロワーの表示/非表示 */
+  open: boolean;
+  /** 集計履歴（新しい順でOK） */
+  items: RangeStatItem[];
+  /** ドロワーを閉じる */
+  onClose: () => void;
+  /** 履歴クリア */
+  onClear: () => void;
+  /**
+   * 任意: 図形中心へズームしたい時に渡す。
+   * 例: onFocus = (geom) => mapRef.current?.fitBounds(L.geoJSON(geom).getBounds(), { padding: [16,16] })
+   */
+  onFocus?: (geom: any) => void;
+  /** 任意: ヘッダー分のオフセット(px)。未指定なら 72 */
+  topOffset?: number;
+};
 
-return (
-<div style={{ position: 'absolute', left: 12, top: 12, zIndex: 400, width: 280 }}>
-<div style={{ background: 'white', borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.15)' }}>
-<div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', borderBottom: '1px solid #eee' }}>
-<div style={{ fontWeight: 600 }}>任意範囲集計</div>
-<button onClick={() => setOpen(o => !o)}>{open ? '閉じる' : '開く'}</button>
-</div>
-{open && (
-<div style={{ padding: 12 }}>
-<div style={{ fontSize: 13, color: '#555', marginBottom: 8 }}>左の描画ツール（四角/円/多角形）で範囲を作図してください。</div>
-{stats ? (
-<div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-<Stat label="本数" value={stats.count} />
-<Stat label="平均樹高(m)" value={fmt(stats.heightAvg)} />
-<Stat label="平均DBH(cm)" value={fmt(stats.dbhAvg)} />
-<Stat label="総材積(m³)" value={fmt(stats.volumeTotal)} />
-</div>
-) : (
-<div style={{ color: '#888' }}>図形作成後に統計が表示されます。</div>
-)}
-</div>
-)}
-</div>
-</div>
-);
+export default function RangeStatsDrawer({
+  open,
+  items,
+  onClose,
+  onClear,
+  onFocus,
+  topOffset = 72,
+}: Props) {
+  if (!open) return null;
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        right: 12,
+        top: topOffset,
+        width: 320,
+        maxHeight: "65%",
+        overflow: "auto",
+        background: "#fff",
+        border: "1px solid #e5e7eb",
+        borderRadius: 10,
+        boxShadow: "0 6px 24px rgba(0,0,0,.12)",
+        zIndex: 1100,
+        padding: 12,
+        pointerEvents: "auto",
+      }}
+    >
+      {/* ヘッダー */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 8,
+        }}
+      >
+        <div style={{ fontWeight: 700 }}>範囲集計</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={onClear}
+            title="一覧をクリア"
+            style={btnStyle()}
+          >
+            クリア
+          </button>
+          <button
+            onClick={onClose}
+            title="閉じる"
+            style={btnStyle()}
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+
+      {/* 説明 */}
+      <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 8 }}>
+        地図左上の描画ツール（□ / ⬠）で範囲を作図すると、ここに集計が追加されます。
+      </div>
+
+      {/* 本体 */}
+      {items.length === 0 ? (
+        <div style={{ color: "#9ca3af" }}>まだ集計結果がありません。</div>
+      ) : (
+        <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 10 }}>
+          {items.map((it, i) => (
+            <li
+              key={i}
+              style={{
+                border: "1px solid #e5e7eb",
+                borderRadius: 8,
+                padding: 10,
+                background: "#fafafa",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: 6,
+                }}
+              >
+                <div style={{ fontWeight: 600 }}>選択 {i + 1}</div>
+                {onFocus && it.geom ? (
+                  <button
+                    onClick={() => onFocus(it.geom)}
+                    title="この範囲へズーム"
+                    style={btnStyle()}
+                  >
+                    ズーム
+                  </button>
+                ) : null}
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "8rem 1fr", rowGap: 6 }}>
+                <Label>選択本数</Label>
+                <Value>{it.stats.count}</Value>
+
+                <Label>平均DBH</Label>
+                <Value>{fmt(it.stats.avgDbh, 1)}<Unit> cm</Unit></Value>
+
+                <Label>平均樹高</Label>
+                <Value>{fmt(it.stats.avgHeight, 1)}<Unit> m</Unit></Value>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
+/* ---------- 小さい表示用コンポーネント/ユーティリティ ---------- */
 
-function Stat({ label, value }: {label:string; value:string|number}) {
-return (
-<div style={{ background: '#fafafa', border: '1px solid #eee', borderRadius: 8, padding: 8 }}>
-<div style={{ fontSize: 11, color: '#666' }}>{label}</div>
-<div style={{ fontSize: 18, fontWeight: 600 }}>{value}</div>
-</div>
-);
+function Label({ children }: { children: React.ReactNode }) {
+  return <div style={{ color: "#6b7280" }}>{children}</div>;
 }
 
+function Value({ children }: { children: React.ReactNode }) {
+  return <div style={{ fontWeight: 700 }}>{children}</div>;
+}
 
-function avg(arr: (number|undefined)[]) { const nums = arr.filter((n): n is number => typeof n === 'number'); return nums.length ? nums.reduce((a,b)=>a+b,0)/nums.length : 0; }
-function sum(arr: (number|undefined)[]) { const nums = arr.filter((n): n is number => typeof n === 'number'); return nums.reduce((a,b)=>a+b,0); }
-function fmt(n: number) { return Number.isFinite(n) ? (Math.round(n*100)/100).toFixed(2) : '-'; }
+function Unit({ children }: { children: React.ReactNode }) {
+  return <span style={{ fontWeight: 500, color: "#6b7280", marginLeft: 4 }}>{children}</span>;
+}
+
+/** ボタンの共通スタイル */
+function btnStyle(): React.CSSProperties {
+  return {
+    padding: "4px 8px",
+    border: "1px solid #e5e7eb",
+    background: "#fff",
+    borderRadius: 8,
+    cursor: "pointer",
+  };
+}
+
+/** 数値のフォーマット。null/NaNは "—" を返す */
+function fmt(n: number | null, digits = 2) {
+  if (n == null || !Number.isFinite(n)) return "—";
+  const f = Math.pow(10, digits);
+  return (Math.round(n * f) / f).toFixed(digits);
+}
