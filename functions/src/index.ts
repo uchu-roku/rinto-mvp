@@ -44,7 +44,8 @@ const LAYER_CONFIG = {
   dem: process.env.TILES_DEM_URL ?? "https://tiles.example.com/dem/{z}/{x}/{y}.png",
   slope: process.env.TILES_SLOPE_URL ?? "https://tiles.example.com/slope/{z}/{x}/{y}.png",
   canopy_surface:
-    process.env.TILES_CANOPY_SURFACE_URL ?? "https://tiles.example.com/canopy_surface/{z}/{x}/{y}.png",
+    process.env.TILES_CANOPY_SURFACE_URL ??
+    "https://tiles.example.com/canopy_surface/{z}/{x}/{y}.png",
   relative_stem_distance_ratio:
     process.env.TILES_RSDR_URL ?? "https://tiles.example.com/rsdr/{z}/{x}/{y}.png",
   orthophoto:
@@ -164,23 +165,28 @@ router.get("/plans", requireAuth, async (req, res) => {
 });
 
 // POST /plans
-router.post("/plans", requireAuth, validateBody(PlanSchema), async (req: Request, res: Response) => {
-  try {
-    const claimOrg = req.user?.org_id;
-    if (claimOrg && claimOrg !== req.body.org_id) {
-      return res.status(403).json({ error: "org_id mismatch" });
+router.post(
+  "/plans",
+  requireAuth,
+  validateBody(PlanSchema),
+  async (req: Request, res: Response) => {
+    try {
+      const claimOrg = req.user?.org_id;
+      if (claimOrg && claimOrg !== req.body.org_id) {
+        return res.status(403).json({ error: "org_id mismatch" });
+      }
+      const payload = {
+        ...req.body,
+        created_by: req.user!.uid,
+        created_at: admin.firestore.FieldValue.serverTimestamp(),
+      };
+      const doc = await db.collection("plans").add(payload);
+      res.status(201).json({ id: doc.id });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "internal error" });
     }
-    const payload = {
-      ...req.body,
-      created_by: req.user!.uid,
-      created_at: admin.firestore.FieldValue.serverTimestamp(),
-    };
-    const doc = await db.collection("plans").add(payload);
-    res.status(201).json({ id: doc.id });
-  } catch (e: any) {
-    res.status(500).json({ error: e?.message ?? "internal error" });
   }
-});
+);
 
 // PATCH /plans/:id
 router.patch("/plans/:id", requireAuth, async (req: Request, res: Response) => {
@@ -224,7 +230,9 @@ router.patch("/plans/:id", requireAuth, async (req: Request, res: Response) => {
       const from = new Date(body.period_from);
       const to = new Date(body.period_to);
       if (Number.isNaN(+from) || Number.isNaN(+to) || from > to) {
-        return res.status(400).json({ error: "invalid period (period_from must be <= period_to)" });
+        return res
+          .status(400)
+          .json({ error: "invalid period (period_from must be <= period_to)" });
       }
     }
 
@@ -330,7 +338,7 @@ router.post(
 );
 
 /* =========================================================
- * 5) 事前DL（オフラインバンドル）実装
+ * 5) 事前DL（オフラインバンドル）
  * 入力: { bbox:{minLng,minLat,maxLng,maxLat}, zmin, zmax, layers[], limit? }
  * 返却: { urls, count, by_layer, tiles }
  * =======================================================*/
@@ -366,7 +374,7 @@ function lngLatToTileXY(lng: number, lat: number, z: number) {
   const y = Math.floor(
     ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n
   );
-  // wrap X
+  // wrap X/Y
   const xWrapped = ((x % n) + n) % n;
   const yClamped = Math.max(0, Math.min(n - 1, y));
   return { x: xWrapped, y: yClamped };
