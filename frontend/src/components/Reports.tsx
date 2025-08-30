@@ -19,7 +19,8 @@ import { toast } from "react-hot-toast";
 import { MapContainer, TileLayer, Polyline } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
-import { submitToOutbox } from "../lib/outbox";
+// ★ submitToOutbox ではなく submitReport を使う
+import { submitReport } from "../lib/outbox";
 
 /* ----------------------------- 型 ----------------------------- */
 type LatLng = { lat: number; lng: number; t: number };
@@ -47,12 +48,9 @@ function distanceKmOf(poly: LatLng[]): number {
   const rad = (x: number) => (x * Math.PI) / 180;
   let sum = 0;
   for (let i = 1; i < poly.length; i++) {
-    const a = poly[i - 1],
-      b = poly[i];
-    const dφ = rad(b.lat - a.lat),
-      dλ = rad(b.lng - a.lng);
-    const φ1 = rad(a.lat),
-      φ2 = rad(b.lat);
+    const a = poly[i - 1], b = poly[i];
+    const dφ = rad(b.lat - a.lat), dλ = rad(b.lng - a.lng);
+    const φ1 = rad(a.lat), φ2 = rad(b.lat);
     const x = Math.sin(dφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
     sum += 2 * R * Math.asin(Math.sqrt(x));
   }
@@ -63,26 +61,14 @@ function distanceKmOf(poly: LatLng[]): number {
 function MiniRouteMap({ pts }: { pts: LatLng[] }) {
   if (!pts.length) {
     return (
-      <div
-        style={{
-          height: 180,
-          border: "1px dashed #ddd",
-          borderRadius: 8,
-          display: "grid",
-          placeItems: "center",
-          color: "#888",
-        }}
-      >
+      <div style={{ height: 180, border: "1px dashed #ddd", borderRadius: 8, display: "grid", placeItems: "center", color: "#888" }}>
         GPSルートなし
       </div>
     );
   }
   const latArr = pts.map((p) => p.lat);
   const lngArr = pts.map((p) => p.lng);
-  const bounds: any = [
-    [Math.min(...latArr), Math.min(...lngArr)],
-    [Math.max(...latArr), Math.max(...lngArr)],
-  ];
+  const bounds: any = [[Math.min(...latArr), Math.min(...lngArr)], [Math.max(...latArr), Math.max(...lngArr)]];
   return (
     <div style={{ height: 180, borderRadius: 8, overflow: "hidden", border: "1px solid #eee" }}>
       <MapContainer style={{ height: "100%" }} bounds={bounds} scrollWheelZoom={false}>
@@ -113,9 +99,7 @@ export default function Reports() {
     if (watchIdRef.current != null) return;
     if (!navigator.geolocation) return toast.error("この端末では位置情報が使えません。");
     const id = navigator.geolocation.watchPosition(
-      (p) => {
-        setPoints((prev) => [...prev, { lat: p.coords.latitude, lng: p.coords.longitude, t: Date.now() }]);
-      },
+      (p) => setPoints((prev) => [...prev, { lat: p.coords.latitude, lng: p.coords.longitude, t: Date.now() }]),
       (e) => toast.error("GPSエラー: " + e.message),
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 }
     );
@@ -123,7 +107,6 @@ export default function Reports() {
     setWatching(true);
     if (!startedAt) setStartedAt(Date.now());
   };
-
   const stopGPS = () => {
     if (watchIdRef.current != null) {
       navigator.geolocation.clearWatch(watchIdRef.current);
@@ -131,17 +114,15 @@ export default function Reports() {
     }
     setWatching(false);
   };
-
   useEffect(() => () => stopGPS(), []);
 
-  // 下書き自動保存（本文・GPS・開始時刻）
+  // 下書き自動保存
   useEffect(() => {
     const tick = setInterval(() => {
       localStorage.setItem("report_draft", JSON.stringify({ body, points, startedAt }));
     }, 2000);
     return () => clearInterval(tick);
   }, [body, points, startedAt]);
-
   useEffect(() => {
     const raw = localStorage.getItem("report_draft");
     if (raw) {
@@ -154,39 +135,30 @@ export default function Reports() {
     }
   }, []);
 
-  // ログイン/トークン変化時に org_id を取得
+  // org_id を claims から
   useEffect(() => {
     const unsub = auth.onIdTokenChanged(async (u) => {
-      if (!u) {
-        setOrgId(null);
-        return;
-      }
+      if (!u) return setOrgId(null);
       const tr = await u.getIdTokenResult();
       setOrgId(((tr?.claims as any)?.org_id as string) || null);
     });
     return () => unsub();
   }, []);
 
-  // 直線合計の距離（km）
+  // 直線合計距離
   const distanceKm = useMemo(() => distanceKmOf(points), [points]);
 
-  // 一覧（同一 org のみ / created_at desc / 50件）
+  // 一覧（同一 org のみ）
   const [items, setItems] = useState<ReportDoc[]>([]);
   useEffect(() => {
-    if (!orgId) {
-      setItems([]);
-      return;
-    }
+    if (!orgId) { setItems([]); return; }
     const q = query(
       collection(db, "work_reports"),
       where("org_id", "==", orgId),
       orderBy("created_at", "desc"),
       limit(50)
     );
-    const unsub = onSnapshot(q, (snap) => {
-      const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-      setItems(rows);
-    });
+    const unsub = onSnapshot(q, (snap) => setItems(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))));
     return () => unsub();
   }, [orgId]);
 
@@ -199,37 +171,26 @@ export default function Reports() {
       return toast.error("本文・写真・GPS のいずれかを入力してください。");
     }
 
-    // --- オフライン時のフォールバック（写真不可） ---
+    const startMs = startedAt ?? (points[0]?.t ?? Date.now());
+    const endMs = points[points.length - 1]?.t ?? Date.now();
+    const workDate = toYMD(new Date(startMs));
+    const distance = Number(distanceKm.toFixed(3)); // km
+
+    // ---- オフライン時：outbox にキュー（写真は不可）----
     if (!navigator.onLine) {
       if (files.length > 0) {
         return toast.error("オフライン時は写真付き送信はできません。オンラインで送信してください。");
       }
       try {
-        const startMs = startedAt ?? (points[0]?.t ?? Date.now());
-        const endMs = points[points.length - 1]?.t ?? Date.now();
-        const workDate = toYMD(new Date(startMs));
-        const track =
-          points.length >= 2
-            ? {
-                type: "LineString" as const,
-                coordinates: points.map((p) => [p.lng, p.lat] as [number, number]),
-                start: new Date(startMs).toISOString(),
-                end: new Date(endMs).toISOString(),
-                length_m: Math.round(distanceKm * 1000),
-              }
-            : null;
-
-        // Outboxへ投入（ワーカーがオンライン時に /api/reports を実行する想定）
-        await submitToOutbox({
-          type: "report",
-          payload: { body: body.trim(), photos: [], track, meta: { work_date: workDate } },
-          request: { url: "/api/reports", method: "POST" },
+        await submitReport({
+          // API /api/reports にそのまま送るボディ（org_id はトークンからサーバ側で解決）
+          work_date: workDate,
+          task_code: "現地確認",
+          output_value: distance,
+          unit: "km",
+          note: body.trim(),
         });
-
-        setBody("");
-        setFiles([]);
-        setPoints([]);
-        setStartedAt(null);
+        setBody(""); setFiles([]); setPoints([]); setStartedAt(null);
         localStorage.removeItem("report_draft");
         toast.success("送信キューに登録しました。オンラインで自動送信します。");
       } catch (e: any) {
@@ -239,7 +200,7 @@ export default function Reports() {
       return;
     }
 
-    // --- オンライン送信（写真アップロード対応） ---
+    // ---- オンライン送信（写真アップロード対応）----
     try {
       setBusy(true);
       setUploadPct(1);
@@ -252,11 +213,10 @@ export default function Reports() {
         return;
       }
 
-      // 1) 写真アップロード（Storage）
+      // 1) 写真アップロード
       const photos: Photo[] = [];
       let done = 0;
       const total = Math.max(1, files.length);
-
       for (const f of files) {
         const path = `reports/${user.uid}/${Date.now()}_${f.name}`;
         const task = uploadBytesResumable(sref(storage, path), f, { contentType: f.type });
@@ -277,11 +237,6 @@ export default function Reports() {
       }
 
       // 2) /api/reports（作業量ログ）
-      const startMs = startedAt ?? (points[0]?.t ?? Date.now());
-      const endMs = points[points.length - 1]?.t ?? Date.now();
-      const workDate = toYMD(new Date(startMs));
-      const distance = Number(distanceKm.toFixed(3)); // km
-
       const { id: report_id } = await authFetch<{ id: string }>("/api/reports", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -314,7 +269,7 @@ export default function Reports() {
         });
       }
 
-      // 4) 一覧用：Firestoreにも従来形式で保存
+      // 4) Firestore（UI一覧用）
       await addDoc(collection(db, "work_reports"), {
         body: body.trim(),
         photos,
@@ -329,11 +284,7 @@ export default function Reports() {
       });
 
       // 5) クリア
-      setBody("");
-      setFiles([]);
-      setPoints([]);
-      setStartedAt(null);
-      setUploadPct(0);
+      setBody(""); setFiles([]); setPoints([]); setStartedAt(null); setUploadPct(0);
       localStorage.removeItem("report_draft");
       toast.success("送信しました");
     } catch (e: any) {
@@ -359,15 +310,7 @@ export default function Reports() {
         />
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
           <label>
-            <span
-              style={{
-                padding: "6px 10px",
-                border: "1px solid #ddd",
-                borderRadius: 8,
-                background: "#fff",
-                cursor: "pointer",
-              }}
-            >
+            <span style={{ padding: "6px 10px", border: "1px solid #ddd", borderRadius: 8, background: "#fff", cursor: "pointer" }}>
               ファイルの選択
             </span>
             <input
