@@ -15,6 +15,14 @@ import OpacitySlider from "./map/OpacitySlider";
 import TreePopup from "./map/TreePopup";
 import LayerManager from "./map/LayerManager";
 import SearchDrawer, { type Filters } from "./search/SearchDrawer";
+import LegendDock from "./map/LegendDock";
+import MapToolbar from "./MapToolbar";
+import RangeStatsDrawer from "./map/RangeStatsDrawer";
+
+// ↓ マーカークラスタを使う場合は依存を入れてください（npm i leaflet.markercluster）
+import "leaflet.markercluster/dist/MarkerCluster.css";
+import "leaflet.markercluster/dist/MarkerCluster.Default.css";
+import "leaflet.markercluster";
 
 /* ----------------------------- 定数 ----------------------------- */
 const SPECIES_COLORS: Record<string, string> = {
@@ -154,11 +162,16 @@ function StatusBar() {
 function ScaleControl() {
   const map = useMap();
   useEffect(() => {
-    // 左下のカードと重なるのを避けるため右下に配置
     const ctrl = L.control.scale({ position: "bottomright", metric: true, imperial: false });
     ctrl.addTo(map);
     return () => (map as any).removeControl(ctrl);
   }, [map]);
+  return null;
+}
+
+function MapReady({ onReady }: { onReady: (map: L.Map) => void }) {
+  const map = useMap();
+  useEffect(() => onReady(map), [map, onReady]);
   return null;
 }
 
@@ -172,7 +185,6 @@ async function fetchTreesByApi(f: Filters): Promise<Tree[]> {
   if (f.maxDbh != null) qs.set("dbh_max", String(f.maxDbh));
   qs.set("limit", String(f.limit ?? 1000));
 
-  // 安全側に /api を明示
   const { items } = await authFetch<{ items: ApiTree[] }>(`/api/trees/search?${qs.toString()}`);
 
   const norm = (p: ApiTree): Tree | null => {
@@ -202,36 +214,28 @@ async function fetchTreesByApi(f: Filters): Promise<Tree[]> {
 function TreesLayer({
   filters,
   onFeaturesChange,
-  initialBounds,
-  leftOffset,
-  registerExport, // 親から渡されるCSVエクスポート登録
+  onLoadingChange,
+  onDrawComputed,
+  detailMode,
+  registerExport, // 親からCSVエクスポート関数を登録
 }: {
   filters: Filters;
   onFeaturesChange: (features: any[]) => void;
-  initialBounds: LatLngBoundsExpression;
-  leftOffset: number;
+  onLoadingChange: (loading: boolean) => void;
+  onDrawComputed: (payload: { geom: any; stats: { count: number; avgDbh: number | null; avgHeight: number | null } }) => void;
+  detailMode: "panel" | "popup";
   registerExport: (fn: () => void) => void;
 }) {
   const map = useMap();
 
-  const layerRef = useRef<L.GeoJSON | null>(null);
+  const layerRef = useRef<L.Layer | null>(null); // cluster or geojson を入れる
   const canvasRendererRef = useRef<L.Canvas>(L.canvas());
-  const drawGroupRef = useRef<L.FeatureGroup | null>(null);
-
-  const [count, setCount] = useState(0);
-  const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<Tree | null>(null);
   const selectedId = selected?.id ?? null;
 
-  const [areaStats, setAreaStats] = useState<{ count: number; avgDbh: number | null; avgHeight: number | null }>({
-    count: 0,
-    avgDbh: null,
-    avgHeight: null,
-  });
-
   const reload = useCallback(async () => {
+    onLoadingChange(true);
     setSelected(null);
-    setLoading(true);
     try {
       const b = map.getBounds();
       const [minLng, minLat, maxLng, maxLat] = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
@@ -242,60 +246,65 @@ function TreesLayer({
 
       const MAX_DRAW = 3000;
       const step = filtered.length > MAX_DRAW ? Math.ceil(filtered.length / MAX_DRAW) : 1;
-      theDraw: {
-        const draw = filtered.filter((_, i) => i % step === 0);
+      const draw = filtered.filter((_, i) => i % step === 0);
 
-        if (layerRef.current) {
-          map.removeLayer(layerRef.current);
-          layerRef.current = null;
-        }
+      if (layerRef.current) {
+        map.removeLayer(layerRef.current);
+        layerRef.current = null;
+      }
 
-        const fc = {
-          type: "FeatureCollection" as const,
-          features: draw.map((t) => ({
-            type: "Feature" as const,
-            geometry: { type: "Point" as const, coordinates: [t.lng, t.lat] },
-            properties: {
-              tree_id: t.id,
-              species: t.species,
-              dbh_cm: t.dbh,
-              height_m: t.height,
-              volume_m3: t.volume,
-              lon: t.lng,
-              lat: t.lat,
-            },
-          })),
-        };
-
-        const lyr = L.geoJSON(fc, {
-          renderer: canvasRendererRef.current,
-          pointToLayer: (f: any, latlng) => {
-            const p = f.properties ?? {};
-            const isSel = selectedId && String(p.tree_id ?? "") === selectedId;
-            const col = SPECIES_COLORS[p.species || "その他"] || "#0a7";
-            return L.circleMarker(latlng, {
-              radius: isSel ? 7 : 4,
-              color: isSel ? "#e91e63" : col,
-              weight: isSel ? 2 : 1,
-            });
+      const fc = {
+        type: "FeatureCollection" as const,
+        features: draw.map((t) => ({
+          type: "Feature" as const,
+          geometry: { type: "Point" as const, coordinates: [t.lng, t.lat] },
+          properties: {
+            tree_id: t.id,
+            species: t.species,
+            dbh_cm: t.dbh,
+            height_m: t.height,
+            volume_m3: t.volume,
+            lon: t.lng,
+            lat: t.lat,
           },
-          onEachFeature: (f, layer) => {
-            const p: any = f.properties ?? {};
-            const div = L.DomUtil.create("div");
-            createRoot(div).render(
-              <TreePopup
-                data={{
-                  tree_id: p.tree_id,
-                  species: p.species,
-                  height_m: p.height_m,
-                  dbh_cm: p.dbh_cm,
-                  volume_m3: p.volume_m3,
-                  lon: p.lon,
-                  lat: p.lat,
-                }}
-              />
-            );
+        })),
+      };
+
+      // クラスタ対応（存在すれば使う）
+      const hasCluster = typeof (L as any).markerClusterGroup === "function";
+      const makeMarker = (f: any, latlng: L.LatLng) => {
+        const p = f.properties ?? {};
+        const isSel = selectedId && String(p.tree_id ?? "") === selectedId;
+        const col = SPECIES_COLORS[p.species || "その他"] || "#0a7";
+        return L.circleMarker(latlng, {
+          radius: isSel ? 7 : 4,
+          color: isSel ? "#e91e63" : col,
+          weight: isSel ? 2 : 1,
+        });
+      };
+
+      const baseGeoJson = L.geoJSON(fc as any, {
+        renderer: canvasRendererRef.current,
+        pointToLayer: (f: any, latlng) => makeMarker(f, latlng),
+        onEachFeature: (f, layer) => {
+          const p: any = f.properties ?? {};
+          const div = L.DomUtil.create("div");
+          createRoot(div).render(
+            <TreePopup
+              data={{
+                tree_id: p.tree_id,
+                species: p.species,
+                height_m: p.height_m,
+                dbh_cm: p.dbh_cm,
+                volume_m3: p.volume_m3,
+                lon: p.lon,
+                lat: p.lat,
+              }}
+            />
+          );
+          if (detailMode === "popup") {
             layer.bindPopup(div);
+          } else {
             layer.on("click", () => {
               const [lng, lat] = (f.geometry as any).coordinates;
               setSelected({
@@ -308,22 +317,27 @@ function TreesLayer({
                 volume: p.volume_m3,
               });
             });
-          },
-        }).addTo(map);
+          }
+        },
+      });
 
-        layerRef.current = lyr;
-        setCount(filtered.length);
-        onFeaturesChange(fc.features);
-      }
+      const groupLayer = hasCluster
+        ? (L as any).markerClusterGroup({ disableClusteringAtZoom: 18 }).addLayer(baseGeoJson)
+        : baseGeoJson;
+
+      groupLayer.addTo(map);
+      layerRef.current = groupLayer;
+
+      onFeaturesChange((fc as any).features);
     } finally {
-      setLoading(false);
+      onLoadingChange(false);
     }
-  }, [filters, map, onFeaturesChange, selectedId]);
+  }, [filters, map, detailMode, onFeaturesChange, onLoadingChange, selectedId]);
 
-  // 選択ハイライト更新
+  // 選択ハイライト更新（panelモード時のみ意味あり）
   useEffect(() => {
-    const l = layerRef.current;
-    if (!l) return;
+    const l: any = layerRef.current;
+    if (!l || !("eachLayer" in l)) return;
     l.eachLayer((layer: any) => {
       const p = layer.feature?.properties ?? {};
       const isSel = selectedId && String(p.tree_id ?? "") === selectedId;
@@ -337,26 +351,33 @@ function TreesLayer({
     });
   }, [selectedId]);
 
-  // 描画（多角形/矩形）で集計
+  // 描画（多角形/矩形）で集計 → RangeStatsDrawerへ
   useEffect(() => {
     const drawnItems = new L.FeatureGroup();
-    drawGroupRef.current = drawnItems; // ← これが無いとクリアが効かない
     const drawControl = new (L.Control as any).Draw({
       draw: { polygon: true, rectangle: true, polyline: false, circle: false, marker: false, circlemarker: false },
       edit: { featureGroup: drawnItems, edit: false, remove: true },
     });
+
     const onCreated = (e: any) => {
       const shape = e.layer;
       drawnItems.clearLayers();
       drawnItems.addLayer(shape);
 
-      const features = (layerRef.current?.toGeoJSON() as any)?.features ?? [];
+      // 現在描画中のFeaturesを取得
+      const features: any[] = ((): any[] => {
+        const l: any = layerRef.current;
+        if (!l) return [];
+        if (l.toGeoJSON) return (l.toGeoJSON() as any)?.features ?? [];
+        // cluster の場合も内部geojsonに対して toGeoJSON が生えるので上でOK
+        return [];
+      })();
+
       const inside = (lat: number, lng: number) => {
         if (shape.getBounds) return shape.getBounds().contains(L.latLng(lat, lng));
         if (shape.getLatLngs) {
           const ll = shape.getLatLngs?.();
           const latlngs: L.LatLng[] = Array.isArray(ll) ? (Array.isArray(ll[0]) ? ll[0] : ll) : [];
-          // 射線法
           const poly: [number, number][] = latlngs.map((p) => [p.lat, p.lng]);
           let x = lng, y = lat, ok = false;
           for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -381,27 +402,26 @@ function TreesLayer({
       const avg = (xs: number[]) =>
         xs.length ? Math.round(((xs.reduce((a, b) => a + b, 0) / xs.length) + Number.EPSILON) * 10) / 10 : null;
 
-      setAreaStats({
-        count: props.length,
-        avgDbh: avg(num(props.map((p: any) => p.dbh_cm))),
-        avgHeight: avg(num(props.map((p: any) => p.height_m))),
+      onDrawComputed({
+        geom: shape.toGeoJSON ? shape.toGeoJSON() : null,
+        stats: {
+          count: props.length,
+          avgDbh: avg(num(props.map((p: any) => p.dbh_cm))),
+          avgHeight: avg(num(props.map((p: any) => p.height_m))),
+        },
       });
     };
-
-    const onDeleted = () => setAreaStats({ count: 0, avgDbh: null, avgHeight: null });
 
     map.addLayer(drawnItems);
     map.addControl(drawControl);
     map.on((L as any).Draw.Event.CREATED, onCreated);
-    map.on((L as any).Draw.Event.DELETED, onDeleted);
 
     return () => {
       map.off((L as any).Draw.Event.CREATED, onCreated);
-      map.off((L as any).Draw.Event.DELETED, onDeleted);
       map.removeControl(drawControl);
       map.removeLayer(drawnItems);
     };
-  }, [map]);
+  }, [map, onDrawComputed]);
 
   // 初回＋パン/ズームで再構築（デバウンス）
   useEffect(() => {
@@ -426,8 +446,9 @@ function TreesLayer({
 
   // CSV出力（現在のGeoJSONをそのままCSV化）
   const exportCsv = useCallback(() => {
-    if (!layerRef.current) return;
-    const gj = layerRef.current.toGeoJSON() as any;
+    const layer: any = layerRef.current;
+    if (!layer || !layer.toGeoJSON) return;
+    const gj = layer.toGeoJSON() as any;
     const rows = (gj.features || []).map((f: any) => {
       const p = f.properties || {};
       const [lng, lat] = f.geometry?.coordinates || [null, null];
@@ -460,102 +481,10 @@ function TreesLayer({
     registerExport(exportCsv);
   }, [exportCsv, registerExport]);
 
-  const topOffset = HEADER_OFFSET + 8;
-
   return (
     <>
-      <div
-        style={{
-          position: "absolute",
-          top: topOffset,
-          left: leftOffset,
-          background: "#fff",
-          padding: 8,
-          borderRadius: 6,
-          boxShadow: "0 2px 8px rgba(0,0,0,.15)",
-          display: "flex",
-          gap: 8,
-          alignItems: "center",
-          zIndex: 1000,
-          transition: "left .18s ease",
-          pointerEvents: "auto",
-        }}
-      >
-        <div>表示本数: {count}{loading ? "（更新中…）" : ""}</div>
-        <button
-          onClick={() => {
-            if (!layerRef.current) return;
-            const features = (layerRef.current.toGeoJSON() as any)?.features ?? [];
-            const props = features.map((f: any) => f.properties || {});
-            const num = (xs: any[]) => xs.map(Number).filter((n) => Number.isFinite(n));
-            const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
-            const countV = props.length;
-            const avg_height = avg(num(props.map((p: any) => p.height_m)));
-            const avg_dbh = avg(num(props.map((p: any) => p.dbh_cm)));
-            const sum_volume = num(props.map((p: any) => p.volume_m3)).reduce((a: number, b: number) => a + b, 0);
-            alert(
-              `本数:${countV}\n平均樹高:${avg_height ? avg_height.toFixed(2) : "—"}m\n平均DBH:${avg_dbh ? avg_dbh.toFixed(1) : "—"}cm\n総材積:${sum_volume ? sum_volume.toFixed(2) : "—"}m³`
-            );
-          }}
-          title="現在の表示範囲を集計"
-        >
-          現在範囲で集計
-        </button>
-        <button onClick={exportCsv} title="表示中の単木をCSV出力 (E)" aria-label="CSV出力">CSV出力</button>
-        <button onClick={() => map.locate({ enableHighAccuracy: true })} title="現在地へ移動 (L)" aria-label="現在地へ">📍</button>
-        <button
-          onClick={() => { localStorage.removeItem(VIEW_KEY); map.fitBounds(initialBounds); }}
-          title="初期表示に戻る (H)"
-          aria-label="初期表示に戻る"
-        >
-          🏠
-        </button>
-      </div>
-
-      {/* 左下：描画範囲の集計 */}
-      <div
-        style={{
-          position: "absolute",
-          bottom: 16,
-          left: leftOffset,
-          background: "#fff",
-          padding: "8px 10px",
-          borderRadius: 8,
-          border: "1px solid #ddd",
-          boxShadow: "0 10px 20px rgba(0,0,0,.08)",
-          zIndex: 1000,
-          transition: "left .18s ease",
-          pointerEvents: "auto",
-        }}
-      >
-        <div>選択本数: <b>{areaStats.count}</b></div>
-        <div>平均DBH: <b>{areaStats.avgDbh ?? "—"}</b></div>
-        <div>平均樹高: <b>{areaStats.avgHeight ?? "—"}</b></div>
-        <div style={{ marginTop: 6, display: "flex", gap: 8 }}>
-          <button
-            onClick={() => {
-              drawGroupRef.current?.clearLayers();
-              setAreaStats({ count: 0, avgDbh: null, avgHeight: null });
-            }}
-            title="選択領域をクリア"
-          >
-            クリア
-          </button>
-        </div>
-      </div>
-
-      {/* Drawツールバーのオフセット */}
-      <style>{`
-        .leaflet-top.leaflet-left .leaflet-draw-toolbar {
-          margin-top: ${HEADER_OFFSET + 8}px;
-          margin-left: ${leftOffset}px;
-        }
-        @media (max-width: 768px) {
-          .leaflet-top.leaflet-left .leaflet-draw-toolbar { margin-top: ${HEADER_OFFSET + 32}px; }
-        }
-      `}</style>
-
-      <TreeDetail tree={selected} onClose={() => setSelected(null)} />
+      {/* 詳細パネルは panel モードのときだけ */}
+      {detailMode === "panel" && <TreeDetail tree={selected} onClose={() => setSelected(null)} />}
     </>
   );
 }
@@ -563,6 +492,7 @@ function TreesLayer({
 /* --------------------------- 親コンポーネント --------------------------- */
 export default function MapView() {
   const winW = useWindowSize();
+  const mapRef = useRef<L.Map | null>(null);
 
   // ベース/オーバーレイ
   const [opacity, setOpacity] = useState<number>(() => Number(localStorage.getItem("overlayOpacity") ?? 0.7));
@@ -573,7 +503,6 @@ export default function MapView() {
     { id: "photo", label: "航空写真", active: false },
   ]);
 
-  // 追加オーバーレイもUIに出す
   const [overlays, setOverlays] = useState([
     { id: "slope", label: "傾斜", visible: false },
     { id: "dem", label: "DEM", visible: false },
@@ -582,6 +511,7 @@ export default function MapView() {
   ]);
 
   const [showLayerManager, setShowLayerManager] = useState(false);
+  const [detailMode, setDetailMode] = useState<"panel" | "popup">("panel");
 
   const activeBase = base.find((b) => b.active)?.id ?? "std";
 
@@ -590,6 +520,13 @@ export default function MapView() {
   const [features, setFeatures] = useState<any[]>([]);
   const [filters, setFilters] = useState<Filters>({});
   const [helpOpen, setHelpOpen] = useState(false);
+
+  // RangeStatsDrawer
+  const [rangeOpen, setRangeOpen] = useState(false);
+  const [rangeStats, setRangeStats] = useState<any[]>([]);
+
+  // ローディング表示用
+  const [loading, setLoading] = useState(false);
 
   const speciesOptions = useMemo(
     () => Array.from(new Set(features.map((f: any) => f.properties?.species).filter(Boolean))) as string[],
@@ -611,7 +548,10 @@ export default function MapView() {
       if (k === "f") setDrawerOpen(true);
       if (k === "?") setHelpOpen((v) => !v);
       if (k === "e") exportCsvRef.current?.();
-      if (k === "h") localStorage.removeItem(VIEW_KEY);
+      if (k === "h") {
+        localStorage.removeItem(VIEW_KEY);
+        mapRef.current?.fitBounds(INITIAL_BOUNDS);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -641,11 +581,26 @@ export default function MapView() {
       .catch(() => setLayerConf({}));
   }, []);
 
+  // 集計関数（Toolbarから呼ぶ）
+  const handleAggregate = useCallback(() => {
+    const props = features.map((f: any) => f.properties || {});
+    const num = (xs: any[]) => xs.map(Number).filter((n) => Number.isFinite(n));
+    const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+    const countV = props.length;
+    const avg_height = avg(num(props.map((p: any) => p.height_m)));
+    const avg_dbh = avg(num(props.map((p: any) => p.dbh_cm)));
+    const sum_volume = num(props.map((p: any) => p.volume_m3)).reduce((a: number, b: number) => a + b, 0);
+    alert(
+      `本数:${countV}\n平均樹高:${avg_height ? avg_height.toFixed(2) : "—"}m\n平均DBH:${avg_dbh ? avg_dbh.toFixed(1) : "—"}cm\n総材積:${sum_volume ? sum_volume.toFixed(2) : "—"}m³`
+    );
+  }, [features]);
+
   return (
     <div style={{ height: "100%", position: "relative" }}>
       <style>{baseToolbarShim}</style>
 
       <MapContainer style={{ height: "100%" }} preferCanvas center={[43.0621, 141.3544]} zoom={16}>
+        <MapReady onReady={(m) => (mapRef.current = m)} />
         <ViewMemory initial={INITIAL_BOUNDS} />
         <ScaleControl />
 
@@ -677,42 +632,41 @@ export default function MapView() {
         <TreesLayer
           filters={filters}
           onFeaturesChange={setFeatures}
-          initialBounds={INITIAL_BOUNDS}
-          leftOffset={leftOffset}
+          onLoadingChange={setLoading}
+          onDrawComputed={(payload) => {
+            setRangeStats((prev) => [payload, ...prev]);
+            setRangeOpen(true);
+          }}
+          detailMode={detailMode}
           registerExport={registerExport}
         />
         <StatusBar />
       </MapContainer>
 
-      {/* 右下：凡例（簡易） */}
-      <div
-        style={{
-          position: "absolute",
-          right: 12,
-          bottom: 12,
-          zIndex: 1001,
-          background: "rgba(255,255,255,.95)",
-          borderRadius: 8,
-          boxShadow: "0 2px 8px rgba(0,0,0,.15)",
-          padding: 8,
-          pointerEvents: "auto",
+      {/* ツールバー（上部・ヘッダー退避） */}
+      <MapToolbar
+        topOffset={HEADER_OFFSET}
+        leftOffset={leftOffset}
+        count={features.length}
+        loading={loading}
+        onAggregate={handleAggregate}
+        onExportCsv={() => exportCsvRef.current?.()}
+        onLocate={() => mapRef.current?.locate({ enableHighAccuracy: true })}
+        onHome={() => {
+          localStorage.removeItem(VIEW_KEY);
+          mapRef.current?.fitBounds(INITIAL_BOUNDS);
         }}
-      >
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>凡例</div>
-        {(speciesOptions.length ? speciesOptions : Object.keys(SPECIES_COLORS)).map((sp) => (
-          <div key={sp} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-            <span
-              style={{
-                width: 16,
-                height: 12,
-                border: "1px solid #999",
-                background: SPECIES_COLORS[sp] || SPECIES_COLORS["その他"],
-              }}
-            />
-            <span style={{ fontSize: 13 }}>{sp}</span>
-          </div>
-        ))}
-      </div>
+      />
+
+      {/* 凡例（Dock版） */}
+      <LegendDock
+        topOffset={HEADER_OFFSET}
+        items={(speciesOptions.length ? speciesOptions : Object.keys(SPECIES_COLORS)).map((sp) => ({
+          label: sp,
+          color: SPECIES_COLORS[sp] || SPECIES_COLORS["その他"],
+        }))}
+        position="bottom-right"
+      />
 
       {/* 右上：レイヤ切替（ヘッダー分下げ） */}
       <LayerSwitcher
@@ -731,6 +685,13 @@ export default function MapView() {
               title="条件検索 (F)"
             >
               条件検索
+            </button>
+            <button
+              onClick={() => setDetailMode((m) => (m === "panel" ? "popup" : "panel"))}
+              style={{ padding: "6px 10px", border: "1px solid #e5e7eb", background: "#fff", borderRadius: 8 }}
+              title="詳細表示モード切替"
+            >
+              詳細: {detailMode}
             </button>
             <button
               onClick={() => setHelpOpen((v) => !v)}
@@ -762,6 +723,14 @@ export default function MapView() {
         />
       )}
 
+      {/* 範囲集計ドロワ */}
+      <RangeStatsDrawer
+        open={rangeOpen}
+        items={rangeStats}
+        onClose={() => setRangeOpen(false)}
+        onClear={() => setRangeStats([])}
+      />
+
       {/* ショートカットヘルプ */}
       {helpOpen && (
         <div
@@ -792,12 +761,13 @@ export default function MapView() {
         </div>
       )}
 
-      {/* 検索ドロワー */}
+      {/* 検索ドロワー（CSV出力も使えるようにするなら onExportCsv を渡す） */}
       <SearchDrawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         speciesOptions={speciesOptions}
         features={features}
+        onExportCsv={() => exportCsvRef.current?.()}
         onApply={(fs) => {
           setFilters(fs);
           setDrawerOpen(false);
