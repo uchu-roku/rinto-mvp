@@ -22,7 +22,6 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          # フロント/関数どちらもキャッシュ対象に
           cache-dependency-path: |
             frontend/package-lock.json
             functions/package-lock.json
@@ -43,11 +42,10 @@ jobs:
             echo VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }}
             echo VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
             echo VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}
-            # 使うなら↓も
             # echo VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
           } > .env
 
-      # 一部 rollup 依存対策（必要なくなったら削除OK）
+      # rollup 周りの一時回避（不要になったら削除OK）
       - name: Pin transitive deps (math-intrinsics)
         working-directory: frontend
         run: npm pkg set "overrides.math-intrinsics=1.0.0"
@@ -60,7 +58,7 @@ jobs:
         working-directory: frontend
         env:
           CI: "true"
-          ENABLE_PWA: "0"   # CI では PWA を無効化（vite-plugin-pwa の buildEnd を回避）
+          ENABLE_PWA: "0"   # CIではPWA無効化（vite-plugin-pwaのbuildEnd回避）
         run: npm run build
 
       - name: Upload frontend artifact
@@ -72,25 +70,21 @@ jobs:
           retention-days: 7
 
       # ---------- Functions ----------
-      - name: Install deps (functions)
+      - name: Install deps (functions) — lockfile が無ければ npm install
         working-directory: functions
-        run: npm ci
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "package-lock.json が無いので npm install を使用します"
+            npm install --no-audit --fund=false
+          fi
 
       - name: Build (functions)
         working-directory: functions
         env:
           CI: "true"
         run: npm run build
-
-      # （必要なら）Functions の環境変数をここで設定してください
-      # - name: Set Functions runtime env (optional)
-      #   run: |
-      #     npm i -g firebase-tools
-      #     firebase functions:config:set \
-      #       tiles.dem="${{ secrets.TILES_DEM_URL }}" \
-      #       tiles.slope="${{ secrets.TILES_SLOPE_URL }}" \
-      #       --project ${{ secrets.FIREBASE_PROJECT_ID }} \
-      #       --token ${{ secrets.FIREBASE_TOKEN }}
 
       # ---------- Deploy ----------
       - name: Deploy Hosting (live)
@@ -101,13 +95,13 @@ jobs:
           projectId: ${{ secrets.FIREBASE_PROJECT_ID }}
           channelId: live
           entryPoint: .
-        # firebase.json の hosting.public が "frontend/dist" を指している想定
+        # ※ firebase.json の hosting.public が "frontend/dist" を指していること
 
       - name: Deploy Functions (api)
         env:
           FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
         run: |
-          npm i -g firebase-tools
+          npm i -g firebase-tools@latest
           firebase deploy --only functions:api \
             --project ${{ secrets.FIREBASE_PROJECT_ID }} \
             --token "$FIREBASE_TOKEN"
